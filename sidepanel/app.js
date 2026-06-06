@@ -182,6 +182,33 @@ const __pc = (() => {
       });
     },
 
+    /** Map-reduce page summarization. onToken streams final summary, onProgress shows section progress. */
+    summarize(onToken, onProgress) {
+      return new Promise((resolve, reject) => {
+        _stopped = false;
+
+        const progressHandler = (msg) => {
+          if (msg.type === 'PC_SUMMARIZE_PROGRESS' && msg.tabId === _myTabId) {
+            if (onProgress) onProgress(msg.progress);
+          }
+        };
+        chrome.runtime.onMessage.addListener(progressHandler);
+
+        _chatCbs = {
+          onToken,
+          resolve: () => { chrome.runtime.onMessage.removeListener(progressHandler); _chatCbs = null; resolve(); },
+          reject:  (e) => { chrome.runtime.onMessage.removeListener(progressHandler); _chatCbs = null; reject(e); },
+        };
+
+        chrome.runtime.sendMessage({ type: 'PC_CMD_SUMMARIZE', tabId: _myTabId })
+          .catch(err => {
+            chrome.runtime.onMessage.removeListener(progressHandler);
+            _chatCbs = null;
+            reject(err);
+          });
+      });
+    },
+
     /** Stop the current streaming response immediately. */
     stop() {
       if (!_chatCbs) return;
@@ -206,6 +233,11 @@ const Ic = {
   fill: () => h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
     h('path', { d: 'M12 20h9' }),
     h('path', { d: 'M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z' })),
+  summarize: () => h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+    h('line', { x1: 3, y1: 6, x2: 21, y2: 6 }),
+    h('line', { x1: 3, y1: 12, x2: 15, y2: 12 }),
+    h('line', { x1: 3, y1: 18, x2: 18, y2: 18 }),
+  ),
   dot: (live) => h('span', {
     className: 'led' + (live ? ' pulse' : ''),
     style: { '--c': live ? 'var(--green)' : 'var(--muted)' },
@@ -216,8 +248,8 @@ const Ic = {
 function statusLabel(status, progress) {
   switch (status) {
     case 'idle':           return 'Loading models…';
-    case 'loading-embed':  return `Downloading embed model… ${progress}%`;
-    case 'loading-chat':   return `Downloading chat model… ${progress}%`;
+    case 'loading-embed':  return progress > 0 ? `Loading embed model… ${progress}%` : 'Loading embed model…';
+    case 'loading-chat':   return progress > 0 ? `Loading model… ${progress}%` : 'Loading model…';
     case 'indexing':       return `Indexing page… ${progress}%`;
     case 'ready-no-index': return 'Models ready — index the current page';
     case 'ready':          return 'Ready';
@@ -433,53 +465,46 @@ function App() {
     return __pc.subscribe(s => setState({ status: s.status, progress: s.progress, useEmbed: s.useEmbed }));
   }, []);
 
-  // Tab change listener — update page pill and re-index / restore cache
+  // Tab change listener — update page pill, restore history, re-index / restore cache
   useEffect(() => {
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (tab) {
-        setPageInfo({ title: tab.title || '', url: tab.url || '' });
-        currentUrlRef.current = tab.url || '';
-        // Restore any existing history for the current tab
-        const url = tab.url || '';
-        if (url) {
-          chrome.storage.session.get(`pagechat_msgs_${url}`, stored => {
-            const saved = stored[`pagechat_msgs_${url}`];
-            if (saved?.length) setMsgs(saved);
-          });
-        }
-      }
-    });
-
     let debounce = null;
-    const handleTabChange = (tab) => {
+
+    const loadTab = (tab, immediate = false) => {
       if (!tab) return;
       const url   = tab.url || '';
       const title = tab.title || '';
       setPageInfo({ title, url });
       currentUrlRef.current = url;
+
+      // Always restore chat history for this URL
+      chrome.storage.session.get(`pagechat_msgs_${url}`, stored => {
+        setMsgs(stored[`pagechat_msgs_${url}`] ?? []);
+      });
+
       if (!url.startsWith('http://') && !url.startsWith('https://')) return;
       const s = __pc.status;
       if (s === 'idle' || s === 'loading-embed' || s === 'loading-chat') return;
 
-      clearTimeout(debounce);
-      debounce = setTimeout(async () => {
+      const run = async () => {
         setSuggestions([]);
-        // Restore session history for this URL, or start fresh
-        chrome.storage.session.get(`pagechat_msgs_${url}`, stored => {
-          setMsgs(stored[`pagechat_msgs_${url}`] ?? []);
-        });
         const hit = await __pc.restoreFromCache(url);
         if (!hit) {
           handleIndex();
         } else if (settingsRef.current.showSuggestions) {
           __pc.suggestQuestions().then(qs => setSuggestions(qs)).catch(() => {});
         }
-      }, 400);
+      };
+
+      clearTimeout(debounce);
+      debounce = immediate ? (run(), null) : setTimeout(run, 400);
     };
+
+    // Initial load — run immediately
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab, true));
 
     const handler = (msg) => {
       if (msg.type === 'TAB_CHANGED' || msg.type === 'TAB_UPDATED') {
-        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => handleTabChange(tab));
+        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab));
       }
     };
     chrome.runtime.onMessage.addListener(handler);
@@ -594,9 +619,45 @@ function App() {
     });
   };
 
+  const handleSummarize = async () => {
+    if (busy || !isReady) return;
+    setMsgs(m => [...m, { role: 'user', content: 'Summarize this page' }, { role: 'assistant', content: 'Starting summarization…', thinking: '' }]);
+    setBusy(true);
+    const updateLast = (content) => setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
+    try {
+      let started = false;
+      await __pc.summarize(
+        (token) => {
+          if (!started) { started = true; updateLast(token); }
+          else setMsgs(m => { const n = [...m], last = n[n.length-1]; n[n.length-1] = { ...last, content: last.content + token }; return n; });
+        },
+        (progress) => { if (!started) updateLast(progress); },
+      );
+      setMsgs(m => {
+        const last = m[m.length-1];
+        if (last?.role === 'assistant' && !last.content.trim()) {
+          const n = [...m]; n[n.length-1] = { ...last, content: "Couldn't generate a summary — try again." }; return n;
+        }
+        return m;
+      });
+    } catch (e) {
+      updateLast('Error: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const send = async (text) => {
     text = text.trim();
     if (!text || busy || !isReady) return;
+
+    const SUMMARIZE_RE = /\b(summarize|summary|tldr|tl;dr|overview|brief me|give me a summary|what is this( page| article| about)?)\b/i;
+    if (SUMMARIZE_RE.test(text)) {
+      setInput('');
+      handleSummarize();
+      return;
+    }
+
     setInput('');
 
     const history = [...msgs, { role: 'user', content: text }];
@@ -752,6 +813,12 @@ function App() {
           disabled: busy,
           autoFocus: true,
         }),
+        isReady && !busy && h('button', {
+          className: 'btn-ghost btn-sm',
+          onClick: handleSummarize,
+          title: 'Summarize this page',
+          style: { flexShrink: 0 },
+        }, Ic.summarize()),
         busy
           ? h('button', { className: 'btn-stop', onClick: () => __pc.stop(), title: 'Stop generating' }, Ic.stop())
           : h('button', { className: 'btn-send', onClick: () => send(input), disabled: !input.trim() }, Ic.send()),

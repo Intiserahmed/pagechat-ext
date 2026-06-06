@@ -25,6 +25,9 @@ broadcast();
 // Auto-start model load when this tab is created
 pc.loadModels();
 
+let _lastKnowledgeText = '';   // dedup: skip re-index if text unchanged
+let _indexingKnowledge = false; // dedup: skip concurrent calls
+
 // Handle commands from iframes (relayed via background or direct runtime messages)
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg.type?.startsWith('PC_CMD_')) return;
@@ -68,12 +71,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         });
       break;
 
+    case 'PC_CMD_SUMMARIZE':
+      pc.summarize(
+        token => chrome.runtime.sendMessage({ type: 'PC_TOKEN', tabId: msg.tabId, token }).catch(() => {}),
+        progress => chrome.runtime.sendMessage({ type: 'PC_SUMMARIZE_PROGRESS', tabId: msg.tabId, progress }).catch(() => {}),
+      )
+        .then(() => {
+          chrome.runtime.sendMessage({ type: 'PC_CHAT_DONE', tabId: msg.tabId }).catch(() => {});
+        })
+        .catch(e => {
+          chrome.runtime.sendMessage({ type: 'PC_ERROR', tabId: msg.tabId, message: e.message }).catch(() => {});
+        });
+      break;
+
     case 'PC_CMD_INDEX_KNOWLEDGE':
+      if (_indexingKnowledge || msg.text === _lastKnowledgeText) break;
+      _indexingKnowledge = true;
+      _lastKnowledgeText = msg.text;
       pc.indexKnowledge(msg.text)
         .then(() => {
+          _indexingKnowledge = false;
           chrome.runtime.sendMessage({ type: 'PC_KNOWLEDGE_DONE', tabId: msg.tabId }).catch(() => {});
         })
         .catch(() => {
+          _indexingKnowledge = false;
           chrome.runtime.sendMessage({ type: 'PC_KNOWLEDGE_DONE', tabId: msg.tabId }).catch(() => {});
         });
       break;
