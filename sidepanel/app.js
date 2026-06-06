@@ -8,11 +8,9 @@ const DEFAULT_SETTINGS = {
   autoIndex:       true,         // auto-index on load in BM25 mode
   showSuggestions: true,         // generate 3 starter questions after indexing
   fillKnowledge:   '',           // personal info used for form autofill
-  useEmbed:        true,         // load embed model for smarter form fill
+  useEmbed:        false,        // disabled: embed model fix pending
 };
-// Qwen3 thinking uses ~300-600 tokens internally (stripped from display by the filter).
-// These budgets include that overhead so the visible response isn't starved.
-const STYLE_TOKENS = { concise: 600, balanced: 1000, detailed: 1800 };
+const STYLE_TOKENS = { concise: 300, balanced: 600, detailed: 1200 };
 
 // ── Proxy to offscreen model host ────────────────────────────────────────────
 // All AI operations are routed as chrome.runtime messages to model-host.js.
@@ -250,6 +248,7 @@ function SettingsPanel({ settings, onChange, knowledgeStatus, useEmbed, modelLoa
   };
 
   return h('div', { className: 'settings' },
+    /* Retrieval mode — re-enable when embed model is fixed
     h('p', { className: 'set-section' }, 'Retrieval mode'),
     h('label', { className: 'embed-toggle' },
       h('input', {
@@ -265,6 +264,7 @@ function SettingsPanel({ settings, onChange, knowledgeStatus, useEmbed, modelLoa
       h('span', null, 'AI embeddings for form fill (nomic-embed-text, +80 MB)'),
     ),
     modelLoaded && h('p', { className: 'set-note' }, 'Takes effect after reloading the extension.'),
+    */
 
     h('p', { className: 'set-section' }, 'Response style'),
     h('div', { className: 'set-trio' },
@@ -308,6 +308,7 @@ function SettingsPanel({ settings, onChange, knowledgeStatus, useEmbed, modelLoa
       h('span', null, 'Show 3 starter questions after indexing'),
     ),
 
+    /* Knowledge base / autofill — re-enable when embed model is fixed
     h('div', { className: 'set-section-row' },
       h('p', { className: 'set-section', style: { margin: 0 } }, 'Knowledge base (for form autofill)'),
       knowledgeStatus === 'indexing' && h('span', { className: 'know-status' }, '⊙ indexing…'),
@@ -324,6 +325,7 @@ function SettingsPanel({ settings, onChange, knowledgeStatus, useEmbed, modelLoa
       className: 'btn-ghost btn-sm set-clear',
       onClick: () => set('fillKnowledge', ''),
     }, 'Clear'),
+    */
 
     h('p', { className: 'set-section' }, 'Custom system prompt'),
     h('textarea', {
@@ -388,6 +390,7 @@ function App() {
   const [knowledgeStatus, setKnowledgeStatus] = useState('idle'); // idle | indexing | ready
   const bottomRef   = useRef(null);
   const settingsRef = useRef(settings);
+  const currentUrlRef = useRef('');
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const { status, progress, useEmbed } = state;
@@ -399,6 +402,13 @@ function App() {
   useEffect(() => {
     chrome.storage.sync.get(DEFAULT_SETTINGS, stored => setSettings(stored));
   }, []);
+
+  // Save chat history to session storage whenever msgs change
+  useEffect(() => {
+    const url = currentUrlRef.current;
+    if (!url || msgs.length === 0) return;
+    chrome.storage.session.set({ [`pagechat_msgs_${url}`]: msgs });
+  }, [msgs]);
 
   // Bootstrap: get state from background cache, subscribe to future state changes
   useEffect(() => {
@@ -426,7 +436,18 @@ function App() {
   // Tab change listener — update page pill and re-index / restore cache
   useEffect(() => {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (tab) setPageInfo({ title: tab.title || '', url: tab.url || '' });
+      if (tab) {
+        setPageInfo({ title: tab.title || '', url: tab.url || '' });
+        currentUrlRef.current = tab.url || '';
+        // Restore any existing history for the current tab
+        const url = tab.url || '';
+        if (url) {
+          chrome.storage.session.get(`pagechat_msgs_${url}`, stored => {
+            const saved = stored[`pagechat_msgs_${url}`];
+            if (saved?.length) setMsgs(saved);
+          });
+        }
+      }
     });
 
     let debounce = null;
@@ -435,6 +456,7 @@ function App() {
       const url   = tab.url || '';
       const title = tab.title || '';
       setPageInfo({ title, url });
+      currentUrlRef.current = url;
       if (!url.startsWith('http://') && !url.startsWith('https://')) return;
       const s = __pc.status;
       if (s === 'idle' || s === 'loading-embed' || s === 'loading-chat') return;
@@ -442,7 +464,10 @@ function App() {
       clearTimeout(debounce);
       debounce = setTimeout(async () => {
         setSuggestions([]);
-        setMsgs([]);
+        // Restore session history for this URL, or start fresh
+        chrome.storage.session.get(`pagechat_msgs_${url}`, stored => {
+          setMsgs(stored[`pagechat_msgs_${url}`] ?? []);
+        });
         const hit = await __pc.restoreFromCache(url);
         if (!hit) {
           handleIndex();
@@ -476,16 +501,8 @@ function App() {
     }
   }, [status, settings.showSuggestions]);
 
-  // Auto-index knowledge base when it changes and model is ready
-  useEffect(() => {
-    if (!settings.fillKnowledge?.trim() || !isReady) return;
-    setKnowledgeStatus('indexing');
-    const t = setTimeout(() => {
-      __pc.indexKnowledge(settings.fillKnowledge)
-        .then(() => setKnowledgeStatus('ready'));
-    }, 800);
-    return () => clearTimeout(t);
-  }, [settings.fillKnowledge, isReady]);
+  // Knowledge indexing only needed when embed model is active (for semantic fill matching)
+  // With embed disabled, fillForm uses BM25 on raw text directly — no pre-indexing needed.
 
   // Auto-index: BM25 mode + autoIndex setting + real web page
   useEffect(() => {
@@ -526,37 +543,50 @@ function App() {
     });
   };
 
+  // Helper: update the last assistant message in place
+  const updateLastMsg = (content) =>
+    setMsgs(m => { const n = [...m]; n[n.length - 1] = { ...n[n.length - 1], content }; return n; });
+
   const handleFill = () => {
     if (!settings.fillKnowledge?.trim()) {
       setMsgs(m => [...m, { role: 'assistant', content: 'Add your personal info in **Settings → Knowledge base** first, then click Fill.', thinking: '' }]);
       setShowSettings(true);
       return;
     }
+
+    // Show initial status immediately
+    setMsgs(m => [...m, { role: 'assistant', content: 'Scanning page for form fields…', thinking: '' }]);
+    setBusy(true);
+
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (!tab?.id) return;
+      if (!tab?.id) { setBusy(false); return; }
       chrome.tabs.sendMessage(tab.id, { type: 'GET_FORM_FIELDS' }, async (resp) => {
         void chrome.runtime.lastError;
         const fields = resp?.fields ?? [];
         if (fields.length === 0) {
-          setMsgs(m => [...m, { role: 'assistant', content: 'No fillable form fields found on this page.', thinking: '' }]);
+          updateLastMsg('No fillable form fields found on this page.');
+          setBusy(false);
           return;
         }
-        setBusy(true);
+
+        updateLastMsg(`Found **${fields.length}** field${fields.length > 1 ? 's' : ''} — generating values from your knowledge base…`);
+
         try {
           const fills = await __pc.fillForm(fields, settings.fillKnowledge);
           const count = Object.keys(fills).length;
           if (count === 0) {
-            setMsgs(m => [...m, { role: 'assistant', content: "Couldn't match any fields to your knowledge base — check your info in Settings.", thinking: '' }]);
+            updateLastMsg("Couldn't match any fields to your knowledge base — check your info in Settings.");
           } else {
+            updateLastMsg(`Applying fills to **${count}** field${count > 1 ? 's' : ''}…`);
             chrome.tabs.sendMessage(tab.id, { type: 'FILL_FIELDS', fills }, () => void chrome.runtime.lastError);
             const filled = Object.entries(fills).map(([idx, val]) => {
               const f = fields[Number(idx)];
               return `· ${f?.label || f?.placeholder || f?.name || idx}: **${val}**`;
             }).join('\n');
-            setMsgs(m => [...m, { role: 'assistant', content: `Filled **${count}** field${count > 1 ? 's' : ''}:\n${filled}`, thinking: '' }]);
+            updateLastMsg(`Filled **${count}** field${count > 1 ? 's' : ''}:\n${filled}`);
           }
         } catch (e) {
-          setMsgs(m => [...m, { role: 'assistant', content: 'Fill error: ' + e.message, thinking: '' }]);
+          updateLastMsg('Fill error: ' + e.message);
         } finally {
           setBusy(false);
         }
@@ -607,6 +637,14 @@ function App() {
         maxTokens:    STYLE_TOKENS[settings.responseStyle] ?? 400,
         k:            settings.chunkK,
       });
+      // Flush any remaining buffer (held back waiting for a <think> tag that never came)
+      if (_buf) {
+        setMsgs(m => {
+          const n = [...m], last = n[n.length - 1];
+          n[n.length - 1] = { ...last, content: last.content + _buf };
+          return n;
+        });
+      }
       setMsgs(m => {
         const last = m[m.length-1];
         if (last?.role === 'assistant' && !last.content.trim()) {
@@ -615,7 +653,10 @@ function App() {
         return m;
       });
     } catch (e) {
-      setMsgs(m => { const n = [...m]; n[n.length-1] = { role: 'assistant', content: 'Error: ' + e.message }; return n; });
+      const msg = e.message?.includes('not indexed')
+        ? 'This page hasn\'t been indexed yet. Wait a moment for auto-indexing, or open Settings and check the page.'
+        : 'Error: ' + e.message;
+      setMsgs(m => { const n = [...m]; n[n.length-1] = { role: 'assistant', content: msg }; return n; });
     } finally {
       setBusy(false);
     }
@@ -630,15 +671,8 @@ function App() {
       h('div', { className: 'hd-l' },
         Ic.dot(isReady),
         h('span', { className: 'hd-title' }, 'PageChat'),
-        h('span', { className: 'hd-sub' }, 'on-device RAG'),
       ),
       h('div', { className: 'hd-l', style: { gap: '6px' } },
-        isReady && h('button', { className: 'btn-ghost btn-sm', onClick: handleIndex, title: 'Re-index current page' },
-          Ic.index(), ' re-index',
-        ),
-        modelLoaded && h('button', { className: 'btn-ghost btn-sm', onClick: handleFill, title: 'Fill form fields on this page' },
-          Ic.fill(), ' fill',
-        ),
         h('button', {
           className: 'btn-ghost btn-sm' + (showSettings ? ' active' : ''),
           onClick: () => setShowSettings(s => !s),
