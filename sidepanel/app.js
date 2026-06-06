@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
   autoIndex:       true,         // auto-index on load in BM25 mode
   showSuggestions: true,         // generate 3 starter questions after indexing
   fillKnowledge:   '',           // personal info used for form autofill
+  useEmbed:        true,         // load embed model for smarter form fill
 };
 // Qwen3 thinking uses ~300-600 tokens internally (stripped from display by the filter).
 // These budgets include that overhead so the visible response isn't starved.
@@ -241,7 +242,7 @@ function ProgressBar({ progress, pulse }) {
 }
 
 // ── Settings panel ───────────────────────────────────────────────────────────
-function SettingsPanel({ settings, onChange, knowledgeStatus }) {
+function SettingsPanel({ settings, onChange, knowledgeStatus, useEmbed, modelLoaded }) {
   const set = (key, val) => {
     const next = { ...settings, [key]: val };
     onChange(next);
@@ -249,6 +250,22 @@ function SettingsPanel({ settings, onChange, knowledgeStatus }) {
   };
 
   return h('div', { className: 'settings' },
+    h('p', { className: 'set-section' }, 'Retrieval mode'),
+    h('label', { className: 'embed-toggle' },
+      h('input', {
+        type: 'checkbox',
+        checked: useEmbed,
+        disabled: modelLoaded,
+        onChange: e => {
+          const val = e.target.checked;
+          set('useEmbed', val);
+          __pc.setUseEmbed(val);
+        },
+      }),
+      h('span', null, 'AI embeddings for form fill (nomic-embed-text, +80 MB)'),
+    ),
+    modelLoaded && h('p', { className: 'set-note' }, 'Takes effect after reloading the extension.'),
+
     h('p', { className: 'set-section' }, 'Response style'),
     h('div', { className: 'set-trio' },
       ['concise', 'balanced', 'detailed'].map(s =>
@@ -389,10 +406,18 @@ function App() {
       void chrome.runtime.lastError;
       if (cached) {
         setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed });
-        // If offscreen was idle or unknown, trigger load (no-op if already running)
-        if (cached.status === 'idle') __pc.loadModels();
+        if (cached.status === 'idle') {
+          // Apply persisted embed preference before starting the load
+          chrome.storage.sync.get({ useEmbed: false }, ({ useEmbed }) => {
+            if (useEmbed) __pc.setUseEmbed(true);
+            __pc.loadModels();
+          });
+        }
       } else {
-        __pc.loadModels();
+        chrome.storage.sync.get({ useEmbed: false }, ({ useEmbed }) => {
+          if (useEmbed) __pc.setUseEmbed(true);
+          __pc.loadModels();
+        });
       }
     });
     return __pc.subscribe(s => setState({ status: s.status, progress: s.progress, useEmbed: s.useEmbed }));
@@ -630,7 +655,7 @@ function App() {
 
     // Settings panel (replaces main area)
     showSettings && h('div', { className: 'msgs' },
-      h(SettingsPanel, { settings, onChange: setSettings, knowledgeStatus }),
+      h(SettingsPanel, { settings, onChange: setSettings, knowledgeStatus, useEmbed, modelLoaded }),
     ),
 
     // ── Main states (hidden when settings open) ──
