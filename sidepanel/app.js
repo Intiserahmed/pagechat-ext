@@ -7,6 +7,7 @@ const DEFAULT_SETTINGS = {
   chunkK:          3,            // chunks to retrieve (2–6)
   autoIndex:       true,         // auto-index on load in BM25 mode
   showSuggestions: true,         // generate 3 starter questions after indexing
+  fillKnowledge:   '',           // personal info used for form autofill
 };
 // Qwen3 thinking uses ~300-600 tokens internally (stripped from display by the filter).
 // These budgets include that overhead so the visible response isn't starved.
@@ -22,6 +23,7 @@ const __pc = (() => {
   const _subs  = new Set();
   let _chatCbs        = null;  // { onToken, resolve, reject }
   let _suggestResolve = null;
+  let _fillResolve    = null;
   let _stopped        = false;
 
   // Cache this iframe's tab ID so we can filter tab-targeted messages.
@@ -65,6 +67,13 @@ const __pc = (() => {
         if (msg.tabId === _myTabId && _suggestResolve) {
           _suggestResolve(msg.questions ?? []);
           _suggestResolve = null;
+        }
+        break;
+
+      case 'PC_FILL_RESULT':
+        if (msg.tabId === _myTabId && _fillResolve) {
+          _fillResolve(msg.fills ?? {});
+          _fillResolve = null;
         }
         break;
     }
@@ -132,6 +141,17 @@ const __pc = (() => {
       });
     },
 
+    /** Fill form fields. Returns Promise<{ idx: value }> */
+    fillForm(fields, request) {
+      return new Promise((resolve, reject) => {
+        _fillResolve = resolve;
+        chrome.runtime.sendMessage({ type: 'PC_CMD_FILL', fields, request, tabId: _myTabId }).catch(err => {
+          _fillResolve = null;
+          reject(err);
+        });
+      });
+    },
+
     /** Stop the current streaming response immediately. */
     stop() {
       if (!_chatCbs) return;
@@ -153,6 +173,9 @@ const Ic = {
     h('path', { d: 'M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z' })),
   stop: () => h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'currentColor' },
     h('rect', { x: 4, y: 4, width: 16, height: 16, rx: 2 })),
+  fill: () => h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+    h('path', { d: 'M12 20h9' }),
+    h('path', { d: 'M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z' })),
   dot: (live) => h('span', {
     className: 'led' + (live ? ' pulse' : ''),
     style: { '--c': live ? 'var(--green)' : 'var(--muted)' },
@@ -236,6 +259,19 @@ function SettingsPanel({ settings, onChange }) {
       }),
       h('span', null, 'Show 3 starter questions after indexing'),
     ),
+
+    h('p', { className: 'set-section' }, 'Knowledge base (for form autofill)'),
+    h('textarea', {
+      className: 'set-prompt',
+      value: settings.fillKnowledge,
+      onChange: e => set('fillKnowledge', e.target.value),
+      placeholder: 'Name: John Doe\nEmail: john@example.com\nPhone: +1 555 1234\nAddress: 123 Main St\n\nAdd any info you want auto-filled into forms.',
+      rows: 6,
+    }),
+    settings.fillKnowledge && h('button', {
+      className: 'btn-ghost btn-sm set-clear',
+      onClick: () => set('fillKnowledge', ''),
+    }, 'Clear'),
 
     h('p', { className: 'set-section' }, 'Custom system prompt'),
     h('textarea', {
@@ -410,10 +446,49 @@ function App() {
     });
   };
 
+  const handleFill = () => {
+    if (!settings.fillKnowledge?.trim()) {
+      setMsgs(m => [...m, { role: 'assistant', content: 'Add your personal info in **Settings → Knowledge base** first, then click Fill.', thinking: '' }]);
+      setShowSettings(true);
+      return;
+    }
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+      if (!tab?.id) return;
+      chrome.tabs.sendMessage(tab.id, { type: 'GET_FORM_FIELDS' }, async (resp) => {
+        void chrome.runtime.lastError;
+        const fields = resp?.fields ?? [];
+        if (fields.length === 0) {
+          setMsgs(m => [...m, { role: 'assistant', content: 'No fillable form fields found on this page.', thinking: '' }]);
+          return;
+        }
+        setBusy(true);
+        try {
+          const fills = await __pc.fillForm(fields, settings.fillKnowledge);
+          const count = Object.keys(fills).length;
+          if (count === 0) {
+            setMsgs(m => [...m, { role: 'assistant', content: "Couldn't match any fields to your knowledge base — check your info in Settings.", thinking: '' }]);
+          } else {
+            chrome.tabs.sendMessage(tab.id, { type: 'FILL_FIELDS', fills }, () => void chrome.runtime.lastError);
+            const filled = Object.entries(fills).map(([idx, val]) => {
+              const f = fields[Number(idx)];
+              return `· ${f?.label || f?.placeholder || f?.name || idx}: **${val}**`;
+            }).join('\n');
+            setMsgs(m => [...m, { role: 'assistant', content: `Filled **${count}** field${count > 1 ? 's' : ''}:\n${filled}`, thinking: '' }]);
+          }
+        } catch (e) {
+          setMsgs(m => [...m, { role: 'assistant', content: 'Fill error: ' + e.message, thinking: '' }]);
+        } finally {
+          setBusy(false);
+        }
+      });
+    });
+  };
+
   const send = async (text) => {
     text = text.trim();
     if (!text || busy || !isReady) return;
     setInput('');
+
     const history = [...msgs, { role: 'user', content: text }];
     setMsgs([...history, { role: 'assistant', content: '', thinking: '' }]);
     setBusy(true);
@@ -480,6 +555,9 @@ function App() {
       h('div', { className: 'hd-l', style: { gap: '6px' } },
         isReady && h('button', { className: 'btn-ghost btn-sm', onClick: handleIndex, title: 'Re-index current page' },
           Ic.index(), ' re-index',
+        ),
+        isReady && h('button', { className: 'btn-ghost btn-sm', onClick: handleFill, title: 'Fill form fields on this page' },
+          Ic.fill(), ' fill',
         ),
         h('button', {
           className: 'btn-ghost btn-sm' + (showSettings ? ' active' : ''),

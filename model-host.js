@@ -62,6 +62,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         });
       break;
 
+    case 'PC_CMD_FILL':
+      pc.fillForm(msg.fields, msg.request)
+        .then(fills => {
+          chrome.runtime.sendMessage({ type: 'PC_FILL_RESULT', tabId: msg.tabId, fills }).catch(() => {});
+        })
+        .catch(e => {
+          chrome.runtime.sendMessage({ type: 'PC_ERROR', tabId: msg.tabId, message: e.message }).catch(() => {});
+        });
+      break;
+
     case 'PC_CMD_CHAT':
       pc.chat(
         msg.messages,

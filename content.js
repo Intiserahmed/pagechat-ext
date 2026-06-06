@@ -91,18 +91,65 @@ function extractPage() {
   return parts.join('\n\n').slice(0, 120_000);
 }
 
-// ── Message listener (for GET_PAGE_CONTENT) ────────────────────────────────
+// ── Form field detection ───────────────────────────────────────────────────
+const SKIP_INPUT_TYPES = new Set(['hidden','submit','button','reset','file','image','checkbox','radio']);
+
+function detectFormFields() {
+  const inputs = Array.from(document.querySelectorAll('input,textarea,select'))
+    .filter(el => !SKIP_INPUT_TYPES.has(el.type) && isVisible(el));
+  return inputs.map((el, idx) => {
+    let label = '';
+    if (el.id) {
+      try { label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.innerText?.trim() || ''; } catch {}
+    }
+    if (!label) label = el.closest('label')?.innerText?.replace(el.value, '').trim() || '';
+    if (!label) label = el.getAttribute('aria-label') || '';
+    if (!label && el.getAttribute('aria-labelledby'))
+      label = document.getElementById(el.getAttribute('aria-labelledby'))?.innerText?.trim() || '';
+    return { idx, label, name: el.name || '', type: el.type || el.tagName.toLowerCase(), placeholder: el.placeholder || '', id: el.id || '' };
+  });
+}
+
+function fillFields(fills) {
+  const inputs = Array.from(document.querySelectorAll('input,textarea,select'))
+    .filter(el => !SKIP_INPUT_TYPES.has(el.type) && isVisible(el));
+  let count = 0;
+  Object.entries(fills).forEach(([idxStr, value]) => {
+    const el = inputs[Number(idxStr)];
+    if (!el || value == null) return;
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+                : el instanceof HTMLSelectElement   ? HTMLSelectElement.prototype
+                                                    : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, String(value)); else el.value = String(value);
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    count++;
+  });
+  return count;
+}
+
+// ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
-  if (msg.type !== 'GET_PAGE_CONTENT') return;
-  const doExtract = () => {
-    reply({ title: document.title, url: location.href, text: extractPage() });
-  };
-  if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    doExtract();
-  } else {
-    document.addEventListener('DOMContentLoaded', doExtract, { once: true });
+  if (msg.type === 'GET_PAGE_CONTENT') {
+    const doExtract = () => {
+      reply({ title: document.title, url: location.href, text: extractPage() });
+    };
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      doExtract();
+    } else {
+      document.addEventListener('DOMContentLoaded', doExtract, { once: true });
+    }
+    return true;
   }
-  return true;
+  if (msg.type === 'GET_FORM_FIELDS') {
+    reply({ fields: detectFormFields() });
+    return true;
+  }
+  if (msg.type === 'FILL_FIELDS') {
+    reply({ count: fillFields(msg.fills) });
+    return true;
+  }
 });
 
 // ── FAB overlay injection ──────────────────────────────────────────────────
