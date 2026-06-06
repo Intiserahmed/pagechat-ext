@@ -1,6 +1,7 @@
 // background.js — Service worker: owns the host tab and routes messages.
 
-let _hostTabId   = null;
+let _hostTabId          = null;
+let _pendingReturnTabId = null;   // tab to restore focus to after model loads
 let _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
 
 async function ensureModelHost() {
@@ -19,10 +20,14 @@ async function ensureModelHost() {
     }
   }
 
-  // Create a pinned background tab — has full GPU context unlike offscreen docs
+  // Remember which tab the user is on so we can return to it after model loads
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  _pendingReturnTabId = activeTab?.id ?? null;
+
+  // Open active so Chrome grants a real WebGPU context — we switch back once the model is ready
   const tab = await chrome.tabs.create({
     url:    chrome.runtime.getURL('model-host.html'),
-    active: false,
+    active: true,
     pinned: true,
   });
   _hostTabId = tab.id;
@@ -62,6 +67,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       chunkCount:  msg.chunkCount,
       cachedPages: msg.cachedPages,
     };
+    // Model finished loading — return focus to the user's original tab
+    if (msg.status === 'ready-no-index' && _pendingReturnTabId !== null) {
+      chrome.tabs.update(_pendingReturnTabId, { active: true }).catch(() => {});
+      _pendingReturnTabId = null;
+    }
     return;
   }
 

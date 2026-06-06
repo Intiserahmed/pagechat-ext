@@ -8,7 +8,9 @@ const DEFAULT_SETTINGS = {
   autoIndex:       true,         // auto-index on load in BM25 mode
   showSuggestions: true,         // generate 3 starter questions after indexing
 };
-const STYLE_TOKENS = { concise: 150, balanced: 400, detailed: 800 };
+// Qwen3 thinking uses ~300-600 tokens internally (stripped from display by the filter).
+// These budgets include that overhead so the visible response isn't starved.
+const STYLE_TOKENS = { concise: 600, balanced: 1000, detailed: 1800 };
 
 // ── Proxy to offscreen model host ────────────────────────────────────────────
 // All AI operations are routed as chrome.runtime messages to model-host.js.
@@ -413,11 +415,38 @@ function App() {
     if (!text || busy || !isReady) return;
     setInput('');
     const history = [...msgs, { role: 'user', content: text }];
-    setMsgs([...history, { role: 'assistant', content: '' }]);
+    setMsgs([...history, { role: 'assistant', content: '', thinking: '' }]);
     setBusy(true);
+
+    // Parse <think>…</think> out of the raw token stream
+    let _inThink = false, _buf = '';
+    const parseThinkToken = (token) => {
+      _buf += token;
+      let thinkDelta = '', contentDelta = '';
+      while (_buf.length > 0) {
+        if (!_inThink) {
+          const s = _buf.indexOf('<think>');
+          if (s === -1) { const safe = Math.max(0, _buf.length - 6); contentDelta += _buf.slice(0, safe); _buf = _buf.slice(safe); break; }
+          contentDelta += _buf.slice(0, s); _buf = _buf.slice(s + 7); _inThink = true;
+        } else {
+          const e = _buf.indexOf('</think>');
+          if (e === -1) { const safe = Math.max(0, _buf.length - 7); thinkDelta += _buf.slice(0, safe); _buf = _buf.slice(safe); break; }
+          thinkDelta += _buf.slice(0, e); _buf = _buf.slice(e + 8); _inThink = false;
+        }
+      }
+      return { thinkDelta, contentDelta };
+    };
+
     try {
       await __pc.chat(history, (token) => {
-        setMsgs(m => { const n = [...m]; n[n.length-1] = { role: 'assistant', content: n[n.length-1].content + token }; return n; });
+        const { thinkDelta, contentDelta } = parseThinkToken(token);
+        if (thinkDelta || contentDelta) {
+          setMsgs(m => {
+            const n = [...m], last = n[n.length - 1];
+            n[n.length - 1] = { ...last, thinking: (last.thinking || '') + thinkDelta, content: last.content + contentDelta };
+            return n;
+          });
+        }
       }, {
         customPrompt: settings.systemPrompt || null,
         maxTokens:    STYLE_TOKENS[settings.responseStyle] ?? 400,
@@ -511,6 +540,10 @@ function App() {
           m.role === 'user'
             ? h('div', { key: i, className: 'msg msg-user' }, m.content)
             : h('div', { key: i, className: 'msg msg-ai' },
+                m.thinking && h('details', { className: 'think-wrap', open: i === msgs.length - 1 && busy },
+                  h('summary', { className: 'think-summary' }, 'Thinking'),
+                  h('div', { className: 'think-body' }, m.thinking),
+                ),
                 ...renderMd(m.content),
                 i === msgs.length - 1 && busy && h('span', { className: 'cur' }, '▌'),
               )

@@ -323,3 +323,40 @@ body {
 }
 .led.pulse { animation: ledPulse 2s ease-in-out infinite; }
 @keyframes ledPulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* ── Thinking block ── */
+.think-wrap {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.think-summary {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  padding: 5px 10px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.think-summary::-webkit-details-marker { display: none; }
+.think-summary::before { content: '▶'; font-size: 6px; transition: transform .15s; }
+details[open] > .think-summary::before { transform: rotate(90deg); }
+.think-body {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  padding: 6px 10px 8px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  border-top: 1px solid var(--line);
+  max-height: 140px;
+  overflow-y: auto;
+}
