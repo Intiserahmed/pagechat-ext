@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "PageChat",
   "short_name": "PageChat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Chat with any webpage. Local LLM + RAG — zero data sent to any server.",
-  "permissions": ["sidePanel", "activeTab", "scripting", "storage"],
+  "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
@@ -14,15 +14,25 @@
     {
       "matches": ["http://*/*", "https://*/*"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_end"
     }
   ],
-  "side_panel": {
-    "default_path": "sidepanel/index.html"
-  },
   "action": {
-    "default_title": "PageChat — Chat with this page"
+    "default_title": "PageChat"
   },
+  "web_accessible_resources": [{
+    "resources": [
+      "sidepanel/index.html",
+      "sidepanel/app.js",
+      "sidepanel/styles.css",
+      "sidepanel/vendor/react.js",
+      "sidepanel/vendor/react-dom.js",
+      "lib/wllama.js",
+      "lib/wllama.wasm",
+      "lib/wllama-bridge.js"
+    ],
+    "matches": ["<all_urls>"]
+  }],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }

@@ -116,6 +116,7 @@ function App() {
   const [busy, setBusy]         = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [suggestions, setSuggestions] = useState([]);
   const bottomRef = useRef(null);
 
   const { status, progress, useEmbed } = state;
@@ -153,6 +154,16 @@ function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [msgs]);
+
+  // Generate suggested questions once page is indexed
+  useEffect(() => {
+    if (status === 'ready' && msgs.length === 0) {
+      setSuggestions([]);
+      window.__pagechat?.suggestQuestions()
+        .then(qs => setSuggestions(qs))
+        .catch(() => {});
+    }
+  }, [status]);
 
   // Auto-index: BM25 mode + autoIndex setting + real web page
   useEffect(() => {
@@ -289,7 +300,15 @@ function App() {
 
     !showSettings && isReady && h(React.Fragment, null,
       h('div', { className: 'msgs' },
-        msgs.length === 0 && h('div', { className: 'empty-hint' }, 'Ask anything about this page.'),
+        msgs.length === 0 && h(React.Fragment, null,
+          h('div', { className: 'empty-hint' }, 'Ask anything about this page.'),
+          suggestions.length > 0 && h('div', { className: 'suggestions' },
+            suggestions.map((q, i) =>
+              h('button', { key: i, className: 'suggestion-chip', onClick: () => send(q) }, q)
+            ),
+          ),
+          suggestions.length === 0 && isReady && h('div', { className: 'suggestions-loading' }, '…'),
+        ),
         msgs.map((m, i) =>
           h('div', { key: i, className: 'msg msg-' + (m.role === 'user' ? 'user' : 'ai') },
             m.content,

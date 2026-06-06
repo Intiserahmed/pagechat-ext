@@ -1,15 +1,10 @@
-// Open side panel when user clicks the extension icon
-chrome.action.onClicked.addListener((tab) => {
-  chrome.sidePanel.open({ tabId: tab.id });
-});
-
-// Notify side panel when active tab changes
+// Notify content script when active tab changes so page pill updates
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  chrome.runtime.sendMessage({ type: 'TAB_CHANGED', tabId }).catch(() => {});
+  chrome.tabs.sendMessage(tabId, { type: 'TAB_CHANGED' }).catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url) {
-    chrome.runtime.sendMessage({ type: 'TAB_UPDATED', tabId, url: tab.url }).catch(() => {});
+    chrome.tabs.sendMessage(tabId, { type: 'TAB_UPDATED', url: tab.url }).catch(() => {});
   }
 });

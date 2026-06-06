@@ -1,4 +1,4 @@
-// Runs in page context — extracts readable text when side panel asks
+// content.js — Page text extraction + FAB overlay injection
 
 // ── 1. JSON-LD structured data ─────────────────────────────────────────────
 function extractJsonLd() {
@@ -44,10 +44,8 @@ function extractMeta() {
 
 // ── 3. innerText per semantic section ─────────────────────────────────────
 const LANDMARK_SEL = 'main, [role="main"], article, [role="article"], section, aside, [role="complementary"], header, footer, nav, [role="navigation"], form';
-const NOISE_ROLES  = new Set(['navigation','banner','contentinfo','dialog','alertdialog','menu','menubar','toolbar','search']);
 
 function isVisible(el) {
-  // Fast visibility check without getComputedStyle
   if (el.hidden) return false;
   if (el.getAttribute('aria-hidden') === 'true') return false;
   if (el.offsetParent === null && el.tagName !== 'BODY') return false;
@@ -57,83 +55,151 @@ function isVisible(el) {
 function sectionLabel(el) {
   const tag  = el.tagName.toLowerCase();
   const role = el.getAttribute('role') || '';
-  const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')
-    ? (el.getAttribute('aria-label') || document.getElementById(el.getAttribute('aria-labelledby'))?.textContent || '')
-    : '';
-  const id   = el.id ? `#${el.id}` : '';
+  const aria = el.getAttribute('aria-label') ||
+    (el.getAttribute('aria-labelledby')
+      ? document.getElementById(el.getAttribute('aria-labelledby'))?.textContent || ''
+      : '');
+  const id = el.id ? `#${el.id}` : '';
   return [aria || role || tag, id].filter(Boolean).join(' ').trim();
 }
 
 function extractSections() {
   const landmarks = Array.from(document.querySelectorAll(LANDMARK_SEL));
-
-  // Remove nested landmarks — keep only top-level ones
   const topLevel = landmarks.filter(el =>
     !landmarks.some(other => other !== el && other.contains(el))
   );
-
   if (topLevel.length === 0) return '';
-
   return topLevel
-    .filter(el => {
-      if (!isVisible(el)) return false;
-      const role = el.getAttribute('role') || '';
-      // Keep nav/header/footer but mark them — don't discard, user may ask about them
-      return true;
-    })
+    .filter(isVisible)
     .map(el => {
       const text = el.innerText?.replace(/\s+/g, ' ').trim() || '';
       if (!text || text.length < 30) return '';
-      const label = sectionLabel(el);
-      return `[${label}]\n${text}`;
+      return `[${sectionLabel(el)}]\n${text}`;
     })
     .filter(Boolean)
     .join('\n\n');
 }
 
-// ── 4. Full body fallback ──────────────────────────────────────────────────
-function extractFallback() {
-  return document.body.innerText?.replace(/\s+/g, ' ').trim() || '';
-}
-
-// ── Assemble ───────────────────────────────────────────────────────────────
 function extractPage() {
   const parts = [];
-
   const jsonld = extractJsonLd();
   if (jsonld) parts.push(jsonld);
-
   const meta = extractMeta();
   if (meta) parts.push(meta);
-
   const sections = extractSections();
-  if (sections) {
-    parts.push(sections);
-  } else {
-    // No landmark sections found — fall back to full body innerText
-    parts.push(extractFallback());
-  }
-
+  parts.push(sections || document.body.innerText?.replace(/\s+/g, ' ').trim() || '');
   return parts.join('\n\n').slice(0, 120_000);
 }
 
-// ── Message listener ───────────────────────────────────────────────────────
+// ── Message listener (for GET_PAGE_CONTENT) ────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type !== 'GET_PAGE_CONTENT') return;
-
   const doExtract = () => {
-    reply({
-      title: document.title,
-      url:   location.href,
-      text:  extractPage(),
-    });
+    reply({ title: document.title, url: location.href, text: extractPage() });
   };
-
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     doExtract();
   } else {
     document.addEventListener('DOMContentLoaded', doExtract, { once: true });
   }
-
   return true;
 });
+
+// ── FAB overlay injection ──────────────────────────────────────────────────
+(function injectFAB() {
+  if (document.getElementById('pagechat-host')) return;
+
+  const host = document.createElement('div');
+  host.id = 'pagechat-host';
+  const shadow = host.attachShadow({ mode: 'open' });
+  const frameUrl = chrome.runtime.getURL('sidepanel/index.html');
+
+  shadow.innerHTML = `
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      .fab {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        background: #c8f24e;
+        color: #0c0e0b;
+        border: none;
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        box-shadow: 0 4px 20px rgba(0,0,0,.4);
+        transition: transform .15s ease, box-shadow .15s ease;
+        z-index: 2147483646;
+      }
+      .fab:hover { transform: scale(1.08); box-shadow: 0 6px 28px rgba(0,0,0,.5); }
+      .fab.open  { background: #1c1f19; color: #c8f24e; box-shadow: 0 4px 20px rgba(200,242,78,.2); }
+      .fab svg   { transition: transform .2s ease; }
+      .fab.open svg { transform: rotate(90deg); }
+
+      .chat-wrap {
+        position: fixed;
+        bottom: 86px;
+        right: 24px;
+        width: 360px;
+        height: 540px;
+        border-radius: 14px;
+        overflow: hidden;
+        box-shadow: 0 12px 48px rgba(0,0,0,.55);
+        z-index: 2147483645;
+        opacity: 0;
+        pointer-events: none;
+        transform: scale(0.94) translateY(10px);
+        transform-origin: bottom right;
+        transition: opacity .2s ease, transform .2s cubic-bezier(.34,1.4,.64,1);
+      }
+      .chat-wrap.open {
+        opacity: 1;
+        pointer-events: all;
+        transform: scale(1) translateY(0);
+      }
+
+      iframe {
+        width: 100%;
+        height: 100%;
+        border: none;
+        display: block;
+        border-radius: 14px;
+      }
+    </style>
+
+    <button class="fab" id="fab" title="PageChat">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+    </button>
+
+    <div class="chat-wrap" id="chat-wrap">
+      <iframe id="chat-frame" src="${frameUrl}"></iframe>
+    </div>
+  `;
+
+  const fab       = shadow.getElementById('fab');
+  const chatWrap  = shadow.getElementById('chat-wrap');
+  let open = false;
+
+  fab.addEventListener('click', () => {
+    open = !open;
+    fab.classList.toggle('open', open);
+    chatWrap.classList.toggle('open', open);
+  });
+
+  // Close on Escape
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && open) {
+      open = false;
+      fab.classList.remove('open');
+      chatWrap.classList.remove('open');
+    }
+  });
+
+  document.documentElement.appendChild(host);
+})();
