@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>PageChat — Model Host</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230c0e0b'/><text x='4' y='24' font-size='22' fill='%23c8f24e' font-family='monospace'>⊗</text></svg>">
+  <style>
+    body {
+      font-family: 'Geist', system-ui, sans-serif;
+      background: #0c0e0b;
+      color: #5a5e54;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      font-size: 12px;
+    }
+    p { text-align: center; line-height: 1.8; margin: 0; }
+    span { color: #c8f24e; font-family: monospace; font-size: 10px; }
+  </style>
+</head>
+<body>
+  <p>
+    <span>⊗ PAGECHAT MODEL HOST</span><br>
+    This pinned tab keeps the AI model loaded in memory<br>
+    so every page shares one session — safe to leave open.
+  </p>
+  <script type="module" src="model-host.js"></script>
+</body>
+</html>

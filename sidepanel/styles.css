@@ -121,10 +121,19 @@ body {
   line-height: 1.6;
   max-width: 94%;
   word-break: break-word;
-  white-space: pre-wrap;
 }
-.msg-user { background: var(--green); color: var(--green-ink); align-self: flex-end; border-radius: 10px 10px 3px 10px; font-weight: 500; }
+.msg-user { background: var(--green); color: var(--green-ink); align-self: flex-end; border-radius: 10px 10px 3px 10px; font-weight: 500; white-space: pre-wrap; }
 .msg-ai   { background: var(--bg-2); color: var(--ink-2); align-self: flex-start; border: 1px solid var(--line); border-radius: 10px 10px 10px 3px; }
+
+/* Markdown elements inside AI messages */
+.msg-ai .md-p  { margin: 0; }
+.msg-ai .md-h  { margin: 4px 0 0; font-weight: 600; color: var(--ink); }
+.msg-ai .md-li { padding-left: 14px; position: relative; }
+.msg-ai .md-li::before { content: '·'; position: absolute; left: 3px; color: var(--green); font-weight: 700; }
+.msg-ai .md-gap { height: 4px; }
+.msg-ai .md-p + .md-p,
+.msg-ai .md-li + .md-li { margin-top: 2px; }
+.msg-ai code { font-family: var(--mono); font-size: 11px; background: rgba(200,242,78,.1); border-radius: 3px; padding: 1px 5px; color: var(--green); }
 
 .cur { color: var(--green); animation: blink .9s step-end infinite; }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
@@ -186,6 +195,21 @@ body {
 }
 .btn-send:hover:not(:disabled) { opacity: .88; }
 .btn-send:disabled { opacity: .3; cursor: not-allowed; }
+
+.btn-stop {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-2);
+  border: 1px solid rgba(200,242,78,.35);
+  color: var(--green);
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color .15s, background .15s;
+}
+.btn-stop:hover { border-color: var(--green); background: rgba(200,242,78,.08); }
 
 .btn-ghost {
   display: inline-flex;

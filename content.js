@@ -137,6 +137,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       }
       .fab:hover { transform: scale(1.08); box-shadow: 0 6px 28px rgba(0,0,0,.5); }
       .fab.open  { background: #1c1f19; color: #c8f24e; box-shadow: 0 4px 20px rgba(200,242,78,.2); }
+      .fab.processing { animation: fabRing 1.6s ease-out infinite; }
+      @keyframes fabRing {
+        0%   { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 0   rgba(200,242,78,.5); }
+        70%  { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 9px rgba(200,242,78,0); }
+        100% { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 0   rgba(200,242,78,0); }
+      }
       .fab svg   { transition: transform .2s ease; }
       .fab.open svg { transform: rotate(90deg); }
 
@@ -199,6 +205,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       fab.classList.remove('open');
       chatWrap.classList.remove('open');
     }
+  });
+
+  // Show pulsing ring on FAB while model is loading or indexing
+  const PROCESSING = new Set(['loading-embed', 'loading-chat', 'indexing']);
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type !== 'PC_STATE') return;
+    fab.classList.toggle('processing', PROCESSING.has(msg.status));
   });
 
   document.documentElement.appendChild(host);
