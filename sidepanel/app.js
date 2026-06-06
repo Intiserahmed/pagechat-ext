@@ -374,8 +374,9 @@ function App() {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const { status, progress, useEmbed } = state;
-  const isReady   = status === 'ready';
-  const isLoading = ['loading-embed', 'loading-chat', 'indexing'].includes(status);
+  const isReady      = status === 'ready';
+  const modelLoaded  = status === 'ready' || status === 'ready-no-index'; // model loaded, page may not be indexed
+  const isLoading    = ['loading-embed', 'loading-chat', 'indexing'].includes(status);
 
   // Load persisted settings
   useEffect(() => {
@@ -610,7 +611,7 @@ function App() {
         isReady && h('button', { className: 'btn-ghost btn-sm', onClick: handleIndex, title: 'Re-index current page' },
           Ic.index(), ' re-index',
         ),
-        isReady && h('button', { className: 'btn-ghost btn-sm', onClick: handleFill, title: 'Fill form fields on this page' },
+        modelLoaded && h('button', { className: 'btn-ghost btn-sm', onClick: handleFill, title: 'Fill form fields on this page' },
           Ic.fill(), ' fill',
         ),
         h('button', {
@@ -657,7 +658,7 @@ function App() {
       h('p', { className: 'setup-sub' }, __pc.chunkCount + ' chunks indexed so far'),
     ),
 
-    !showSettings && isReady && h(React.Fragment, null,
+    !showSettings && (isReady || (modelLoaded && msgs.length > 0)) && h(React.Fragment, null,
       h('div', { className: 'msgs' },
         msgs.length === 0 && h(React.Fragment, null,
           h('div', { className: 'empty-hint' }, 'Ask anything about this page.'),
