@@ -133,6 +133,7 @@ function App() {
     const pc = window.__pagechat;
     if (!pc) return;
     setState({ status: pc.status, progress: pc.progress, useEmbed: pc.useEmbed });
+    if (pc.status === 'idle') pc.loadModels();
     return pc.subscribe(s => setState({ ...s }));
   }, []);
 
@@ -140,15 +141,38 @@ function App() {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       if (tab) setPageInfo({ title: tab.title || '', url: tab.url || '' });
     });
+
+    let debounce = null;
+    const handleTabChange = (tab) => {
+      if (!tab) return;
+      const url   = tab.url || '';
+      const title = tab.title || '';
+      setPageInfo({ title, url });
+      if (!url.startsWith('http://') && !url.startsWith('https://')) return;
+      const pc = window.__pagechat;
+      if (!pc || pc.status === 'idle' || pc.status === 'loading-embed' || pc.status === 'loading-chat') return;
+
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        setSuggestions([]);
+        setMsgs([]);
+        // Try cache first — if miss, auto-reindex
+        if (!pc.restoreFromCache(url)) {
+          handleIndex();
+        } else {
+          // Cache hit — regenerate suggestions for new page
+          pc.suggestQuestions().then(qs => setSuggestions(qs)).catch(() => {});
+        }
+      }, 400);
+    };
+
     const handler = (msg) => {
       if (msg.type === 'TAB_CHANGED' || msg.type === 'TAB_UPDATED') {
-        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-          if (tab) setPageInfo({ title: tab.title || '', url: tab.url || '' });
-        });
+        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => handleTabChange(tab));
       }
     };
     chrome.runtime.onMessage.addListener(handler);
-    return () => chrome.runtime.onMessage.removeListener(handler);
+    return () => { chrome.runtime.onMessage.removeListener(handler); clearTimeout(debounce); };
   }, []);
 
   useEffect(() => {
@@ -195,7 +219,7 @@ function App() {
         }
         setPageInfo({ title: resp.title, url: resp.url });
         setMsgs([]);
-        window.__pagechat.indexPage(resp.text).catch(console.error);
+        window.__pagechat.indexPage(resp.text, resp.url).catch(console.error);
       });
     });
   };
@@ -264,20 +288,10 @@ function App() {
     ),
 
     // ── Main states (hidden when settings open) ──
-    !showSettings && (status === 'idle' || status === 'error') && h('div', { className: 'setup' },
+    !showSettings && status === 'error' && h('div', { className: 'setup' },
       h('div', { className: 'setup-icon' }, '⬡'),
-      h('p', { className: 'setup-msg' }, status === 'error' ? 'Something went wrong.' : 'Local LLM — no data leaves your device.'),
-      h('p', { className: 'setup-sub' }, useEmbed ? 'Downloads chat (~400MB) + embed (~80MB) models.' : 'Downloads chat model (~400MB). BM25 keyword retrieval.'),
-      h('label', { className: 'embed-toggle' },
-        h('input', {
-          type: 'checkbox', checked: useEmbed, disabled: !canToggle,
-          onChange: e => window.__pagechat?.setUseEmbed(e.target.checked),
-        }),
-        h('span', null, 'AI embeddings (+80MB, semantic search)'),
-      ),
-      h('button', { className: 'btn-primary', onClick: handleLoad },
-        status === 'error' ? 'Retry' : 'Load models', ' ', Ic.index(),
-      ),
+      h('p', { className: 'setup-msg' }, 'Something went wrong loading the model.'),
+      h('button', { className: 'btn-primary', onClick: handleLoad }, 'Retry ', Ic.index()),
     ),
 
     !showSettings && isLoading && status !== 'indexing' && h('div', { className: 'setup' },
@@ -335,7 +349,7 @@ function App() {
 
     // Footer
     h('div', { className: 'footer' },
-      '⊗ 0 bytes egress · runs locally · ' + (window.__pagechat?.chunkCount || 0) + ' chunks indexed',
+      '⊗ 0 bytes egress · ' + (window.__pagechat?.chunkCount || 0) + ' chunks · ' + (window.__pagechat?.cachedPages || 0) + ' pages cached',
     ),
   );
 }
