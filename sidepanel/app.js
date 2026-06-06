@@ -21,10 +21,11 @@ const __pc = (() => {
   let _state   = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
   let _myTabId = null;
   const _subs  = new Set();
-  let _chatCbs        = null;  // { onToken, resolve, reject }
-  let _suggestResolve = null;
-  let _fillResolve    = null;
-  let _stopped        = false;
+  let _chatCbs           = null;  // { onToken, resolve, reject }
+  let _suggestResolve    = null;
+  let _fillResolve       = null;
+  let _knowledgeResolve  = null;
+  let _stopped           = false;
 
   // Cache this iframe's tab ID so we can filter tab-targeted messages.
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
@@ -74,6 +75,13 @@ const __pc = (() => {
         if (msg.tabId === _myTabId && _fillResolve) {
           _fillResolve(msg.fills ?? {});
           _fillResolve = null;
+        }
+        break;
+
+      case 'PC_KNOWLEDGE_DONE':
+        if (msg.tabId === _myTabId && _knowledgeResolve) {
+          _knowledgeResolve();
+          _knowledgeResolve = null;
         }
         break;
     }
@@ -138,6 +146,29 @@ const __pc = (() => {
           _chatCbs = null;
           reject(err);
         });
+      });
+    },
+
+    /** Clear wllama model cache. Resolves when done. */
+    clearModelCache() {
+      return new Promise(resolve => {
+        const handler = (msg) => {
+          if (msg.type === 'PC_CACHE_CLEARED') {
+            chrome.runtime.onMessage.removeListener(handler);
+            resolve();
+          }
+        };
+        chrome.runtime.onMessage.addListener(handler);
+        chrome.runtime.sendMessage({ type: 'PC_CMD_CLEAR_CACHE' }).catch(() => { resolve(); });
+      });
+    },
+
+    /** Index personal knowledge base. Returns Promise that resolves when done. */
+    indexKnowledge(text) {
+      return new Promise((resolve) => {
+        _knowledgeResolve = resolve;
+        chrome.runtime.sendMessage({ type: 'PC_CMD_INDEX_KNOWLEDGE', text, tabId: _myTabId })
+          .catch(() => { _knowledgeResolve = null; resolve(); });
       });
     },
 
@@ -210,7 +241,7 @@ function ProgressBar({ progress, pulse }) {
 }
 
 // ── Settings panel ───────────────────────────────────────────────────────────
-function SettingsPanel({ settings, onChange }) {
+function SettingsPanel({ settings, onChange, knowledgeStatus }) {
   const set = (key, val) => {
     const next = { ...settings, [key]: val };
     onChange(next);
@@ -260,7 +291,11 @@ function SettingsPanel({ settings, onChange }) {
       h('span', null, 'Show 3 starter questions after indexing'),
     ),
 
-    h('p', { className: 'set-section' }, 'Knowledge base (for form autofill)'),
+    h('div', { className: 'set-section-row' },
+      h('p', { className: 'set-section', style: { margin: 0 } }, 'Knowledge base (for form autofill)'),
+      knowledgeStatus === 'indexing' && h('span', { className: 'know-status' }, '⊙ indexing…'),
+      knowledgeStatus === 'ready'    && h('span', { className: 'know-status ready' }, '✓ ready'),
+    ),
     h('textarea', {
       className: 'set-prompt',
       value: settings.fillKnowledge,
@@ -285,6 +320,13 @@ function SettingsPanel({ settings, onChange }) {
       className: 'btn-ghost btn-sm set-clear',
       onClick: () => set('systemPrompt', ''),
     }, 'Reset to default'),
+
+    h('p', { className: 'set-section', style: { marginTop: '10px' } }, 'Model cache'),
+    h('button', {
+      className: 'btn-ghost btn-sm',
+      onClick: () => __pc.clearModelCache(),
+      title: 'Clears cached model files — fixes corrupted cache errors. Model will re-download on next load.',
+    }, 'Clear model cache'),
   );
 }
 
@@ -325,7 +367,8 @@ function App() {
   const [busy, setBusy]         = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  const [suggestions, setSuggestions] = useState([]);
+  const [suggestions, setSuggestions]         = useState([]);
+  const [knowledgeStatus, setKnowledgeStatus] = useState('idle'); // idle | indexing | ready
   const bottomRef   = useRef(null);
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
@@ -406,6 +449,17 @@ function App() {
         .catch(() => {});
     }
   }, [status, settings.showSuggestions]);
+
+  // Auto-index knowledge base when it changes and model is ready
+  useEffect(() => {
+    if (!settings.fillKnowledge?.trim() || !isReady) return;
+    setKnowledgeStatus('indexing');
+    const t = setTimeout(() => {
+      __pc.indexKnowledge(settings.fillKnowledge)
+        .then(() => setKnowledgeStatus('ready'));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [settings.fillKnowledge, isReady]);
 
   // Auto-index: BM25 mode + autoIndex setting + real web page
   useEffect(() => {
@@ -575,7 +629,7 @@ function App() {
 
     // Settings panel (replaces main area)
     showSettings && h('div', { className: 'msgs' },
-      h(SettingsPanel, { settings, onChange: setSettings }),
+      h(SettingsPanel, { settings, onChange: setSettings, knowledgeStatus }),
     ),
 
     // ── Main states (hidden when settings open) ──

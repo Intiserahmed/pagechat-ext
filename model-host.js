@@ -34,6 +34,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       pc.loadModels();
       break;
 
+    case 'PC_CMD_CLEAR_CACHE':
+      pc.clearModelCache()
+        .then(() => chrome.runtime.sendMessage({ type: 'PC_CACHE_CLEARED' }).catch(() => {}))
+        .catch(() => chrome.runtime.sendMessage({ type: 'PC_CACHE_CLEARED' }).catch(() => {}));
+      break;
+
     case 'PC_CMD_INDEX':
       pc.indexPage(msg.text, msg.url).catch(console.error);
       break;
@@ -59,6 +65,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         })
         .catch(() => {
           chrome.runtime.sendMessage({ type: 'PC_SUGGESTIONS', tabId: msg.tabId, questions: [] }).catch(() => {});
+        });
+      break;
+
+    case 'PC_CMD_INDEX_KNOWLEDGE':
+      pc.indexKnowledge(msg.text)
+        .then(() => {
+          chrome.runtime.sendMessage({ type: 'PC_KNOWLEDGE_DONE', tabId: msg.tabId }).catch(() => {});
+        })
+        .catch(() => {
+          chrome.runtime.sendMessage({ type: 'PC_KNOWLEDGE_DONE', tabId: msg.tabId }).catch(() => {});
         });
       break;
 
