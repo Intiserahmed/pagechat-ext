@@ -1,0 +1,223 @@
+/* PageChat — side panel styles */
+:root {
+  --bg:      #0c0e0b;
+  --bg-1:    #111310;
+  --bg-2:    #181a16;
+  --line:    rgba(255,255,255,0.08);
+  --ink:     #e8eae4;
+  --ink-2:   #b0b5a8;
+  --muted:   #5a5e54;
+  --green:   #c8f24e;
+  --green-ink: #0c0e0b;
+  --mono:    'Geist Mono', monospace;
+  --sans:    'Geist', system-ui, sans-serif;
+  --r:       10px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root { height: 100%; }
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  gap: 8px;
+}
+.hd-l { display: flex; align-items: center; gap: 7px; }
+.hd-title { font-weight: 600; font-size: 13px; letter-spacing: -0.01em; }
+.hd-sub { font-family: var(--mono); font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; }
+
+/* ── Page pill ── */
+.page-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+  flex-shrink: 0;
+}
+.page-domain { font-family: var(--mono); font-size: 9px; color: var(--green); opacity: 0.8; }
+.page-title  { font-size: 11px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Setup / loading screens ── */
+.setup {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 28px 20px;
+  text-align: center;
+}
+.setup-icon { font-size: 28px; color: var(--green); opacity: 0.6; }
+.setup-msg  { font-size: 13px; color: var(--ink-2); font-weight: 500; line-height: 1.5; }
+.setup-sub  { font-family: var(--mono); font-size: 10px; color: var(--muted); line-height: 1.6; }
+
+/* ── Progress bar ── */
+.prog-wrap { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.prog-bar  { width: 100%; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.prog-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width .4s ease; }
+.prog-pct  { font-family: var(--mono); font-size: 9px; color: var(--muted); }
+@keyframes progPulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* ── Messages ── */
+.msgs {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.msgs::-webkit-scrollbar { width: 4px; }
+.msgs::-webkit-scrollbar-track { background: transparent; }
+.msgs::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
+
+.empty-hint { color: var(--muted); font-size: 12px; text-align: center; margin-top: 40px; }
+
+.msg {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  max-width: 94%;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.msg-user { background: var(--green); color: var(--green-ink); align-self: flex-end; border-radius: 10px 10px 3px 10px; font-weight: 500; }
+.msg-ai   { background: var(--bg-2); color: var(--ink-2); align-self: flex-start; border: 1px solid var(--line); border-radius: 10px 10px 10px 3px; }
+
+.cur { color: var(--green); animation: blink .9s step-end infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+/* ── Input row ── */
+.input-row {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+  background: var(--bg-1);
+}
+.input {
+  flex: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--ink);
+  outline: none;
+  transition: border-color .15s;
+}
+.input:focus { border-color: rgba(200,242,78,.35); }
+.input::placeholder { color: var(--muted); }
+
+/* ── Buttons ── */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 18px;
+  background: var(--green);
+  color: var(--green-ink);
+  border: none;
+  border-radius: 8px;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+.btn-primary:hover { opacity: .88; }
+
+.btn-send {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  background: var(--green);
+  color: var(--green-ink);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity .15s;
+}
+.btn-send:hover:not(:disabled) { opacity: .88; }
+.btn-send:disabled { opacity: .3; cursor: not-allowed; }
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.btn-ghost:hover { border-color: var(--green); color: var(--green); }
+.btn-sm { padding: 4px 10px; font-size: 9px; }
+
+/* ── Footer ── */
+.footer {
+  font-family: var(--mono);
+  font-size: 8px;
+  color: var(--muted);
+  text-align: center;
+  padding: 6px;
+  border-top: 1px solid var(--line);
+  letter-spacing: .06em;
+  flex-shrink: 0;
+}
+
+/* ── Embed toggle ── */
+.embed-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-2);
+  cursor: pointer;
+  user-select: none;
+}
+.embed-toggle input { accent-color: var(--green); cursor: pointer; }
+.embed-toggle input:disabled { cursor: not-allowed; opacity: .4; }
+
+/* ── LED ── */
+.led {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--c, var(--muted));
+  display: inline-block;
+  flex-shrink: 0;
+}
+.led.pulse { animation: ledPulse 2s ease-in-out infinite; }
+@keyframes ledPulse { 0%,100%{opacity:1} 50%{opacity:.4} }
