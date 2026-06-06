@@ -621,27 +621,25 @@ function App() {
 
   const handleSummarize = async () => {
     if (busy || !isReady) return;
-    setMsgs(m => [...m, { role: 'user', content: 'Summarize this page' }, { role: 'assistant', content: 'Starting summarization…', thinking: '' }]);
+    setMsgs(m => [...m, { role: 'user', content: 'Summarize this page' }, { role: 'assistant', content: '', thinking: 'Starting…' }]);
     setBusy(true);
-    const updateLast = (content) => setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
+    const updateLast = (patch) => setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], ...patch }; return n; });
     try {
-      let started = false;
       await __pc.summarize(
         (token) => {
-          if (!started) { started = true; updateLast(token); }
-          else setMsgs(m => { const n = [...m], last = n[n.length-1]; n[n.length-1] = { ...last, content: last.content + token }; return n; });
+          setMsgs(m => { const n = [...m], last = n[n.length-1]; n[n.length-1] = { ...last, content: last.content + token }; return n; });
         },
-        (progress) => { if (!started) updateLast(progress); },
+        (progress) => { updateLast({ thinking: progress }); },
       );
       setMsgs(m => {
         const last = m[m.length-1];
         if (last?.role === 'assistant' && !last.content.trim()) {
-          const n = [...m]; n[n.length-1] = { ...last, content: "Couldn't generate a summary — try again." }; return n;
+          const n = [...m]; n[n.length-1] = { ...last, content: "Couldn't generate a summary — try again.", thinking: '' }; return n;
         }
-        return m;
+        const n = [...m]; n[n.length-1] = { ...last, thinking: '' }; return n;
       });
     } catch (e) {
-      updateLast('Error: ' + e.message);
+      updateLast({ content: 'Error: ' + e.message, thinking: '' });
     } finally {
       setBusy(false);
     }
