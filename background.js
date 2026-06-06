@@ -2,9 +2,17 @@
 
 let _hostTabId          = null;
 let _pendingReturnTabId = null;   // tab to restore focus to after model loads
+let _ensurePromise      = null;   // deduplicates concurrent ensureModelHost calls
 let _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
 
 async function ensureModelHost() {
+  // If already in progress, wait for the same promise — prevents multiple tabs on concurrent calls
+  if (_ensurePromise) return _ensurePromise;
+  _ensurePromise = _doEnsureModelHost().finally(() => { _ensurePromise = null; });
+  return _ensurePromise;
+}
+
+async function _doEnsureModelHost() {
   // SW may have been killed and restarted — restore persisted tab ID first
   if (_hostTabId === null) {
     const stored = await chrome.storage.session.get('hostTabId');

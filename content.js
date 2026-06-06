@@ -113,9 +113,22 @@ function detectFormFields() {
 function fillFields(fills) {
   const inputs = Array.from(document.querySelectorAll('input,textarea,select'))
     .filter(el => !SKIP_INPUT_TYPES.has(el.type) && isVisible(el));
+
+  // Build name/id/label → index lookup for when AI uses non-numeric keys
+  const byKey = {};
+  inputs.forEach((el, idx) => {
+    if (el.name) byKey[el.name.toLowerCase()] = idx;
+    if (el.id)   byKey[el.id.toLowerCase()]   = idx;
+    if (el.placeholder) byKey[el.placeholder.toLowerCase()] = idx;
+  });
+
   let count = 0;
-  Object.entries(fills).forEach(([idxStr, value]) => {
-    const el = inputs[Number(idxStr)];
+  Object.entries(fills).forEach(([key, value]) => {
+    if (!value) return;
+    // Try numeric index first, then name/id/label fallback
+    let idx = Number(key);
+    if (isNaN(idx)) idx = byKey[key.toLowerCase()] ?? -1;
+    const el = inputs[idx];
     if (!el || value == null) return;
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
                 : el instanceof HTMLSelectElement   ? HTMLSelectElement.prototype
