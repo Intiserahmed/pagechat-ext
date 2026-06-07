@@ -634,9 +634,9 @@ function App() {
 
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
-        // Get current DOM tree from the page
+        // Get semantically-filtered DOM tree for this goal
         const domResult = await new Promise((resolve, reject) => {
-          chrome.tabs.sendMessage(tab.id, { type: 'GET_DOM_TREE' }, resp => {
+          chrome.tabs.sendMessage(tab.id, { type: 'GET_DOM_TREE', goal }, resp => {
             if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
             else resolve(resp);
           });
@@ -645,32 +645,36 @@ function App() {
         // Placeholder step message
         setMsgs(m => [...m, { role: 'assistant', content: `⟳ Thinking… (${domResult.count} elements)`, isAgent: true }]);
 
-        // Ask LLM what to do
-        const actionRaw = await __pc.agentStep(goal, domResult.text, history);
-        const parsed    = parseAgentAction(actionRaw);
+        // Ask LLM what to do — returns parsed JSON object
+        const parsed = await __pc.agentStep(goal, domResult.text, history);
+        const action = parsed.action;
+
+        // Summarise the action for display
+        let actionSummary;
+        if (action === 'click')    actionSummary = `click [${parsed.index}]`;
+        else if (action === 'fill') actionSummary = `fill [${parsed.index}] "${parsed.value}"`;
+        else if (action === 'scroll') actionSummary = `scroll [${parsed.index}] ${parsed.direction}`;
+        else if (action === 'navigate') actionSummary = `navigate ${parsed.url}`;
+        else if (action === 'done') actionSummary = `done`;
+        else actionSummary = JSON.stringify(parsed);
 
         // Update step message with actual action
-        setMsgs(m => { const n = [...m]; n[n.length - 1] = { role: 'assistant', content: `→ ${actionRaw}`, isAgent: true }; return n; });
+        setMsgs(m => { const n = [...m]; n[n.length - 1] = { role: 'assistant', content: `→ ${actionSummary}`, isAgent: true }; return n; });
 
-        if (parsed.type === 'done') {
+        if (action === 'done') {
           if (parsed.answer) setMsgs(m => [...m, { role: 'assistant', content: parsed.answer }]);
           break;
         }
 
-        if (parsed.type === 'unknown') {
-          setMsgs(m => [...m, { role: 'assistant', content: `Couldn't parse action: "${actionRaw}" — stopping.` }]);
-          break;
-        }
-
-        history.push(actionRaw);
+        history.push(actionSummary);
 
         // Execute action on page
-        if (parsed.type === 'navigate') {
+        if (action === 'navigate') {
           chrome.tabs.update(tab.id, { url: parsed.url });
           await sleep(1500);
         } else {
           await new Promise(resolve => {
-            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action: parsed.type, index: parsed.index, value: parsed.value, direction: parsed.direction }, () => {
+            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action, index: parsed.index, value: parsed.value, direction: parsed.direction }, () => {
               void chrome.runtime.lastError;
               resolve();
             });

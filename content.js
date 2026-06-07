@@ -177,9 +177,11 @@ function executeAgentAction(action, index, value, direction) {
 // ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === 'GET_DOM_TREE') {
-    const { text, map, count } = buildDomTree();
-    _domMap = map;
-    reply({ text, count });
+    let result = buildDomTree();
+    // Semantic pre-filter: if a goal is provided, score elements and keep top 20
+    if (msg.goal) result = filterByGoal(result, msg.goal, 20);
+    _domMap = result.map;
+    reply({ text: result.text, count: result.count });
     return true;
   }
   if (msg.type === 'EXECUTE_ACTION') {
