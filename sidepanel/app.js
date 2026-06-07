@@ -479,6 +479,7 @@ function App() {
   const [state, setState]       = useState({ status: 'idle', progress: 0, useEmbed: false });
   const [pageInfo, setPageInfo] = useState({ title: '', url: '' });
   const [msgs, setMsgs]         = useState([]);
+  const [agentMsgs, setAgentMsgs] = useState([]); // isolated agent messages — never reset by loadTab
   const [input, setInput]       = useState('');
   const [busy, setBusy]         = useState(false);
   const [agentBusy, setAgentBusy] = useState(false);
@@ -679,7 +680,7 @@ function App() {
     if (agentBusy || !initialGoal.trim()) return;
     setAgentBusy(true);
     setInput('');
-    setMsgs(m => [...m, { role: 'user', content: initialGoal }]);
+    setAgentMsgs([{ role: 'user', content: initialGoal }]);
 
     // ── Planner: split goal into ordered sub-steps on "then" connectors ──────
     // e.g. "click jobs then search ios engineer" → ["click jobs", "search ios engineer"]
@@ -707,7 +708,7 @@ function App() {
       });
     });
     if (!attachResult.ok) {
-      setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + attachResult.error }]);
+      setAgentMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + attachResult.error }]);
       setAgentBusy(false);
       return;
     }
@@ -729,8 +730,8 @@ function App() {
           });
 
           // Embed-filter DOM to top 15 most relevant elements
-          const updateStep = (content) => setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
-          setMsgs(m => [...m, { role: 'assistant', content: `⟳ ${stepLabel} — filtering ${domResult.count} elements…`, isAgent: true }]);
+          const updateStep = (content) => setAgentMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
+          setAgentMsgs(m => [...m, { role: 'assistant', content: `⟳ ${stepLabel} — filtering ${domResult.count} elements…`, isAgent: true }]);
 
           const { text: filteredText, indexMap } = await __pc.embedFilter(
             step, domResult.text, 15,
@@ -764,7 +765,7 @@ function App() {
 
           // Model says this step is done — move to next sub-step
           if (action === 'done') {
-            if (parsed.answer) setMsgs(m => [...m, { role: 'assistant', content: parsed.answer }]);
+            if (parsed.answer) setAgentMsgs(m => [...m, { role: 'assistant', content: parsed.answer }]);
             break;
           }
 
@@ -816,16 +817,17 @@ function App() {
         }
       }
 
-      setMsgs(m => [...m, { role: 'assistant', content: '✓ All steps complete', isAgent: true }]);
+      setAgentMsgs(m => [...m, { role: 'assistant', content: '✓ All steps complete', isAgent: true }]);
     } catch (e) {
       if (e.message?.includes('Extension context invalidated')) {
         window.location.reload();
         return;
       }
-      setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
+      setAgentMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
     } finally {
       chrome.runtime.sendMessage({ type: 'AGENT_STOP', tabId: tab.id }, () => void chrome.runtime.lastError);
       setAgentBusy(false);
+      // agentMsgs will be cleared when agentBusy flips — see render logic
     }
   };
 
@@ -1113,7 +1115,7 @@ function App() {
           ),
           settings.showSuggestions && suggestions.length === 0 && isReady && h('div', { className: 'suggestions-loading' }, '…'),
         ),
-        msgs.map((m, i) =>
+        (agentBusy ? agentMsgs : msgs).map((m, i) =>
           m.role === 'user'
             ? h('div', { key: i, className: 'msg msg-user' }, m.content)
             : m.isAgent
