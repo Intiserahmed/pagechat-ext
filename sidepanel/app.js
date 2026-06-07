@@ -599,12 +599,13 @@ function App() {
         // SW was killed — reconnect and request fresh state so sidepanel un-grays
         setTimeout(() => {
           connectPort();
-          chrome.runtime.sendMessage({ type: 'PC_CMD_STATE' }, cached => {
-            void chrome.runtime.lastError;
-            if (cached) setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed });
-          });
-          // Ask model host to re-broadcast its actual status
-          chrome.runtime.sendMessage({ type: 'PC_CMD_STATE_REQ' }).catch(() => {});
+          try {
+            chrome.runtime.sendMessage({ type: 'PC_CMD_STATE' }, cached => {
+              void chrome.runtime.lastError;
+              if (cached) setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed });
+            });
+            chrome.runtime.sendMessage({ type: 'PC_CMD_STATE_REQ' }, () => void chrome.runtime.lastError);
+          } catch { /* extension context not yet valid — connectPort will retry */ }
         }, 200);
       });
     };
