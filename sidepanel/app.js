@@ -682,11 +682,20 @@ function App() {
     setInput('');
     setAgentMsgs([{ role: 'user', content: initialGoal }]);
 
-    // ── Planner: split goal into ordered sub-steps on "then" connectors ──────
-    // e.g. "click jobs then search ios engineer" → ["click jobs", "search ios engineer"]
+    // ── Planner: split goal into ordered sub-steps ───────────────────────────
+    // Split on "then" first, then split each part on "and" only when both sides
+    // start with an action verb — so "click docs and search gemma" splits but
+    // "search for ios and android" does not.
+    const ACTION_VERB = /^(click|go|navigate|search|find|type|fill|open|select|scroll|press|visit)\b/i;
+    const splitOnAnd = (s) => {
+      const parts = s.split(/\s+and\s+/i);
+      return (parts.length > 1 && parts.every(p => ACTION_VERB.test(p.trim())))
+        ? parts.map(p => p.trim())
+        : [s.trim()];
+    };
     const steps = initialGoal
       .split(/,?\s*\bthen\b\s*/i)
-      .map(s => s.trim())
+      .flatMap(part => splitOnAnd(part.trim()))
       .filter(Boolean);
 
     const MAX_ITERS_PER_STEP = 5; // executor retry budget per sub-step
