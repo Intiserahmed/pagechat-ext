@@ -154,7 +154,10 @@ function executeAgentAction(action, index, value, direction) {
 
     if (action === 'click') {
       el.focus();
-      el.click();
+      // Dispatch full mouse event sequence so React/Vue synthetic events fire
+      ['mousedown', 'mouseup', 'click'].forEach(type => {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      });
     } else if (action === 'fill') {
       el.focus();
       // Use native setter so React/Vue state updates fire correctly

@@ -649,13 +649,21 @@ function App() {
         const parsed = await __pc.agentStep(goal, domResult.text, history);
         const action = parsed.action;
 
+        // Extract element label from domResult.text for a given index
+        const elLabel = (idx) => {
+          const line = domResult.text.split('\n').find(l => l.startsWith(`[${idx}]`));
+          if (!line) return `[${idx}]`;
+          const after = line.replace(/^\[\d+\]\s*/, ''); // strip "[N] "
+          return `"${after.slice(0, 50)}"`;
+        };
+
         // Summarise the action for display
         let actionSummary;
-        if (action === 'click')    actionSummary = `click [${parsed.index}]`;
-        else if (action === 'fill') actionSummary = `fill [${parsed.index}] "${parsed.value}"`;
-        else if (action === 'scroll') actionSummary = `scroll [${parsed.index}] ${parsed.direction}`;
+        if (action === 'click')       actionSummary = `click ${elLabel(parsed.index)}`;
+        else if (action === 'fill')   actionSummary = `fill ${elLabel(parsed.index)} → "${parsed.value}"`;
+        else if (action === 'scroll') actionSummary = `scroll ${elLabel(parsed.index)} ${parsed.direction}`;
         else if (action === 'navigate') actionSummary = `navigate ${parsed.url}`;
-        else if (action === 'done') actionSummary = `done`;
+        else if (action === 'done')   actionSummary = `done`;
         else actionSummary = JSON.stringify(parsed);
 
         // Update step message with actual action
@@ -666,21 +674,30 @@ function App() {
           break;
         }
 
-        history.push(actionSummary);
+        // Detect repeated same action — break out to avoid infinite loops
+        const sameCount = history.filter(h => h === actionSummary).length;
+        if (sameCount >= 2) {
+          setMsgs(m => [...m, { role: 'assistant', content: `Stuck repeating "${actionSummary}" — stopping.` }]);
+          break;
+        }
 
         // Execute action on page
+        let actionResult = 'ok';
         if (action === 'navigate') {
           chrome.tabs.update(tab.id, { url: parsed.url });
           await sleep(1500);
         } else {
-          await new Promise(resolve => {
-            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action, index: parsed.index, value: parsed.value, direction: parsed.direction }, () => {
+          const result = await new Promise(resolve => {
+            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action, index: parsed.index, value: parsed.value, direction: parsed.direction }, resp => {
               void chrome.runtime.lastError;
-              resolve();
+              resolve(resp);
             });
           });
+          if (result && !result.ok) actionResult = 'failed: ' + result.error;
           await sleep(800);
         }
+
+        history.push(`${actionSummary} [${actionResult}]`);
       }
     } catch (e) {
       setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
