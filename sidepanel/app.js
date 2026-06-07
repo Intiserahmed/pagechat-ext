@@ -24,8 +24,9 @@ const __pc = (() => {
   let _suggestResolve    = null;
   let _fillResolve       = null;
   let _knowledgeResolve  = null;
-  let _agentResolve      = null;
-  let _stopped           = false;
+  let _agentResolve        = null;
+  let _embedFilterResolve  = null;
+  let _stopped             = false;
 
   // Cache this iframe's tab ID so we can filter tab-targeted messages.
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
@@ -89,6 +90,13 @@ const __pc = (() => {
         if (msg.tabId === _myTabId && _agentResolve) {
           _agentResolve(msg.action);
           _agentResolve = null;
+        }
+        break;
+
+      case 'PC_EMBED_FILTER_RESULT':
+        if (msg.tabId === _myTabId && _embedFilterResolve) {
+          _embedFilterResolve({ text: msg.text, indexMap: msg.indexMap });
+          _embedFilterResolve = null;
         }
         break;
     }
@@ -214,6 +222,15 @@ const __pc = (() => {
             _chatCbs = null;
             reject(err);
           });
+      });
+    },
+
+    /** Filter DOM elements by nomic-embed cosine similarity. Returns { text, indexMap }. */
+    embedFilter(goal, domText, topK = 15) {
+      return new Promise((resolve, reject) => {
+        _embedFilterResolve = resolve;
+        chrome.runtime.sendMessage({ type: 'PC_CMD_EMBED_FILTER', goal, domText, topK, tabId: _myTabId })
+          .catch(err => { _embedFilterResolve = null; reject(err); });
       });
     },
 
@@ -642,11 +659,15 @@ function App() {
           });
         });
 
-        // Placeholder step message
-        setMsgs(m => [...m, { role: 'assistant', content: `⟳ Thinking… (${domResult.count} elements)`, isAgent: true }]);
+        // Embed-filter DOM to top 15 most relevant elements (nomic-embed cosine sim)
+        setMsgs(m => [...m, { role: 'assistant', content: `⟳ Filtering ${domResult.count} elements…`, isAgent: true }]);
+        const { text: filteredText, indexMap } = await __pc.embedFilter(goal, domResult.text);
+
+        // Update placeholder with filtered count
+        setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content: `⟳ Thinking… (${filteredText.split('\n').filter(Boolean).length} elements)` }; return n; });
 
         // Ask LLM what to do — returns parsed JSON object
-        const parsed = await __pc.agentStep(goal, domResult.text, history);
+        const parsed = await __pc.agentStep(goal, filteredText, history);
         const action = parsed.action;
 
         // Extract element label from domResult.text for a given index
@@ -674,12 +695,15 @@ function App() {
           break;
         }
 
-        // Detect repeated same action — break out to avoid infinite loops
-        const sameCount = history.filter(h => h === actionSummary).length;
+        // Detect repeated same action — compare against stored summaries (without result suffix)
+        const sameCount = history.filter(h => h.startsWith(actionSummary)).length;
         if (sameCount >= 2) {
           setMsgs(m => [...m, { role: 'assistant', content: `Stuck repeating "${actionSummary}" — stopping.` }]);
           break;
         }
+
+        // Translate LLM's re-indexed index → original _domMap index
+        const origIndex = (indexMap && parsed.index != null) ? (indexMap[parsed.index] ?? parsed.index) : parsed.index;
 
         // Execute action on page
         let actionResult = 'ok';
@@ -688,7 +712,7 @@ function App() {
           await sleep(1500);
         } else {
           const result = await new Promise(resolve => {
-            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action, index: parsed.index, value: parsed.value, direction: parsed.direction }, resp => {
+            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action, index: origIndex, value: parsed.value, direction: parsed.direction }, resp => {
               void chrome.runtime.lastError;
               resolve(resp);
             });
@@ -697,7 +721,8 @@ function App() {
           await sleep(800);
         }
 
-        history.push(`${actionSummary} [${actionResult}]`);
+        // Include result so model knows if action worked; note "no visible change" when page didn't react
+        history.push(`${actionSummary} → ${actionResult}`);
       }
     } catch (e) {
       setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);

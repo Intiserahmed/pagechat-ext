@@ -180,9 +180,9 @@ function executeAgentAction(action, index, value, direction) {
 // ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === 'GET_DOM_TREE') {
+    // Build full DOM tree; HTML-heuristics pre-filter to 40 candidates for embed re-ranking
     let result = buildDomTree();
-    // Semantic pre-filter: if a goal is provided, score elements and keep top 20
-    if (msg.goal) result = filterByGoal(result, msg.goal, 20);
+    if (msg.goal) result = filterByGoal(result, msg.goal, 40);
     _domMap = result.map;
     reply({ text: result.text, count: result.count });
     return true;

@@ -109,6 +109,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         });
       break;
 
+    case 'PC_CMD_EMBED_FILTER':
+      pc.embedFilter(msg.goal, msg.domText, msg.topK)
+        .then(result => {
+          chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, ...result }).catch(() => {});
+        })
+        .catch(e => {
+          // Embed failed — return original text unfiltered so agent can still run
+          chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, text: msg.domText, indexMap: null }).catch(() => {});
+        });
+      break;
+
     case 'PC_CMD_AGENT_STEP':
       pc.agentStep(msg.goal, msg.domTree, msg.history)
         .then(action => {
