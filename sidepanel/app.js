@@ -12,6 +12,14 @@ const DEFAULT_SETTINGS = {
 };
 const STYLE_TOKENS = { concise: 300, balanced: 600, detailed: 1200 };
 
+// Reload panel if extension context is invalidated (SW update/reload)
+window.addEventListener('error', (e) => {
+  if (e.message?.includes('Extension context invalidated')) window.location.reload();
+});
+window.addEventListener('unhandledrejection', (e) => {
+  if (e.reason?.message?.includes('Extension context invalidated')) window.location.reload();
+});
+
 // ── Proxy to offscreen model host ────────────────────────────────────────────
 // All AI operations are routed as chrome.runtime messages to model-host.js.
 // Responses stream back as PC_STATE / PC_TOKEN / PC_CHAT_DONE / PC_ERROR /
@@ -24,9 +32,11 @@ const __pc = (() => {
   let _suggestResolve    = null;
   let _fillResolve       = null;
   let _knowledgeResolve  = null;
-  let _agentResolve        = null;
-  let _embedFilterResolve  = null;
-  let _stopped             = false;
+  let _agentResolve           = null;
+  let _embedFilterResolve     = null;
+  let _embedStatusCb          = null;
+  let _remainingGoalResolve   = null;
+  let _stopped                = false;
 
   // Cache this iframe's tab ID so we can filter tab-targeted messages.
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
@@ -91,6 +101,17 @@ const __pc = (() => {
           _agentResolve(msg.action);
           _agentResolve = null;
         }
+        break;
+
+      case 'PC_REMAINING_GOAL_RESULT':
+        if (msg.tabId === _myTabId && _remainingGoalResolve) {
+          _remainingGoalResolve(msg.remaining);
+          _remainingGoalResolve = null;
+        }
+        break;
+
+      case 'PC_EMBED_STATUS':
+        if (msg.tabId === _myTabId && _embedStatusCb) _embedStatusCb(msg.status);
         break;
 
       case 'PC_EMBED_FILTER_RESULT':
@@ -225,12 +246,22 @@ const __pc = (() => {
       });
     },
 
+    /** After an action, ask model what goal remains. Returns remaining goal string or "done". */
+    remainingGoal(goal, actionTaken) {
+      return new Promise((resolve, reject) => {
+        _remainingGoalResolve = resolve;
+        chrome.runtime.sendMessage({ type: 'PC_CMD_REMAINING_GOAL', goal, actionTaken, tabId: _myTabId })
+          .catch(err => { _remainingGoalResolve = null; reject(err); });
+      });
+    },
+
     /** Filter DOM elements by nomic-embed cosine similarity. Returns { text, indexMap }. */
-    embedFilter(goal, domText, topK = 15) {
+    embedFilter(goal, domText, topK = 15, onStatus) {
       return new Promise((resolve, reject) => {
         _embedFilterResolve = resolve;
+        _embedStatusCb = onStatus ?? null;
         chrome.runtime.sendMessage({ type: 'PC_CMD_EMBED_FILTER', goal, domText, topK, tabId: _myTabId })
-          .catch(err => { _embedFilterResolve = null; reject(err); });
+          .catch(err => { _embedFilterResolve = null; _embedStatusCb = null; reject(err); });
       });
     },
 
@@ -547,7 +578,13 @@ function App() {
     // Auto-reconnects when the service worker is killed and restarts.
     let port;
     const connectPort = () => {
-      port = chrome.runtime.connect({ name: 'sidepanel' });
+      try {
+        port = chrome.runtime.connect({ name: 'sidepanel' });
+      } catch (e) {
+        // Extension context invalidated (SW reloaded) — reload the panel to restore context
+        if (e.message?.includes('Extension context invalidated')) { window.location.reload(); return; }
+        throw e;
+      }
       port.onMessage.addListener((msg) => {
         if (msg.type === 'TAB_UPDATED' && msg.url) {
           chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
@@ -638,15 +675,14 @@ function App() {
     return { type: 'unknown', raw: s };
   }
 
-  const runAgent = async (goal) => {
-    if (agentBusy || !goal.trim()) return;
+  const runAgent = async (initialGoal) => {
+    if (agentBusy || !initialGoal.trim()) return;
     setAgentBusy(true);
     setInput('');
-    setMsgs(m => [...m, { role: 'user', content: goal }]);
+    setMsgs(m => [...m, { role: 'user', content: initialGoal }]);
 
-    const history = [];
+    let goal = initialGoal;
     const MAX_STEPS = 8;
-
     const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
 
     try {
@@ -660,14 +696,19 @@ function App() {
         });
 
         // Embed-filter DOM to top 15 most relevant elements (nomic-embed cosine sim)
+        const updateStep = (content) => setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
         setMsgs(m => [...m, { role: 'assistant', content: `⟳ Filtering ${domResult.count} elements…`, isAgent: true }]);
-        const { text: filteredText, indexMap } = await __pc.embedFilter(goal, domResult.text);
 
-        // Update placeholder with filtered count
-        setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content: `⟳ Thinking… (${filteredText.split('\n').filter(Boolean).length} elements)` }; return n; });
+        const { text: filteredText, indexMap } = await __pc.embedFilter(
+          goal, domResult.text, 15,
+          (status) => updateStep(`⟳ ${status}`),
+        );
+
+        const keptCount = filteredText.split('\n').filter(Boolean).length;
+        updateStep(`⟳ Thinking… (top ${keptCount} elements)`);
 
         // Ask LLM what to do — returns parsed JSON object
-        const parsed = await __pc.agentStep(goal, filteredText, history);
+        const parsed = await __pc.agentStep(goal, filteredText, []);
         const action = parsed.action;
 
         // Extract element label from domResult.text for a given index
@@ -695,13 +736,6 @@ function App() {
           break;
         }
 
-        // Detect repeated same action — compare against stored summaries (without result suffix)
-        const sameCount = history.filter(h => h.startsWith(actionSummary)).length;
-        if (sameCount >= 2) {
-          setMsgs(m => [...m, { role: 'assistant', content: `Stuck repeating "${actionSummary}" — stopping.` }]);
-          break;
-        }
-
         // Translate LLM's re-indexed index → original _domMap index
         const origIndex = (indexMap && parsed.index != null) ? (indexMap[parsed.index] ?? parsed.index) : parsed.index;
 
@@ -721,8 +755,14 @@ function App() {
           await sleep(800);
         }
 
-        // Include result so model knows if action worked; note "no visible change" when page didn't react
-        history.push(`${actionSummary} → ${actionResult}`);
+        // Ask model what goal remains after this action
+        setMsgs(m => [...m, { role: 'assistant', content: `⟳ Evaluating remaining goal…`, isAgent: true }]);
+        const remaining = await __pc.remainingGoal(goal, actionSummary);
+        const isDone = /^done\.?$/i.test(remaining.trim()) || remaining.trim() === '';
+        setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content: isDone ? `✓ Goal complete` : `↳ Remaining: ${remaining}` }; return n; });
+
+        if (isDone) break;
+        goal = remaining; // narrow the goal for next step
       }
     } catch (e) {
       setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);

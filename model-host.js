@@ -110,13 +110,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
 
     case 'PC_CMD_EMBED_FILTER':
-      pc.embedFilter(msg.goal, msg.domText, msg.topK)
+      pc.embedFilter(msg.goal, msg.domText, msg.topK, (status) => {
+        chrome.runtime.sendMessage({ type: 'PC_EMBED_STATUS', tabId: msg.tabId, status }).catch(() => {});
+      })
         .then(result => {
           chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, ...result }).catch(() => {});
         })
         .catch(e => {
           // Embed failed — return original text unfiltered so agent can still run
           chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, text: msg.domText, indexMap: null }).catch(() => {});
+        });
+      break;
+
+    case 'PC_CMD_REMAINING_GOAL':
+      pc.remainingGoal(msg.goal, msg.actionTaken)
+        .then(remaining => {
+          chrome.runtime.sendMessage({ type: 'PC_REMAINING_GOAL_RESULT', tabId: msg.tabId, remaining }).catch(() => {});
+        })
+        .catch(() => {
+          chrome.runtime.sendMessage({ type: 'PC_REMAINING_GOAL_RESULT', tabId: msg.tabId, remaining: 'done' }).catch(() => {});
         });
       break;
 
