@@ -682,30 +682,11 @@ function App() {
     setInput('');
     setAgentMsgs([{ role: 'user', content: initialGoal }]);
 
-    // ── Planner: split goal into ordered sub-steps ───────────────────────────
-    // Split on "then" first, then split each part on "and" only when both sides
-    // start with an action verb — so "click docs and search gemma" splits but
-    // "search for ios and android" does not.
-    const ACTION_VERB = /^(click|go|navigate|search|find|type|fill|open|select|scroll|press|visit)\b/i;
-    const splitOnAnd = (s) => {
-      const parts = s.split(/\s+and\s+/i);
-      return (parts.length > 1 && parts.every(p => ACTION_VERB.test(p.trim())))
-        ? parts.map(p => p.trim())
-        : [s.trim()];
-    };
-    const steps = initialGoal
-      .split(/,?\s*\bthen\b\s*/i)
-      .flatMap(part => splitOnAnd(part.trim()))
-      .filter(Boolean);
-
-    const MAX_ITERS_PER_STEP = 5; // executor retry budget per sub-step
+    const MAX_STEPS = 12;
     const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
 
-    // Helper: get current tab URL (for navigation detection)
     const getTabUrl = () => new Promise(r => chrome.tabs.get(tab.id, t => r(t?.url ?? '')));
-
-    // Helper: re-attach CDP (needed after page navigations)
-    const reattach = () => new Promise(resolve => {
+    const reattach  = () => new Promise(resolve => {
       chrome.runtime.sendMessage({ type: 'AGENT_START', tabId: tab.id }, r => { void chrome.runtime.lastError; resolve(r); });
     });
 
@@ -723,110 +704,90 @@ function App() {
     }
 
     try {
-      // ── Executor: run each sub-step ─────────────────────────────────────────
-      for (let si = 0; si < steps.length; si++) {
-        const step = steps[si];
-        const stepLabel = steps.length > 1 ? `[${si + 1}/${steps.length}] ${step}` : step;
+      const actionHistory = []; // accumulates completed actions — passed to LLM each step
 
-        for (let iter = 0; iter < MAX_ITERS_PER_STEP; iter++) {
-          // Get semantic element list via CDP Accessibility tree
-          const domResult = await new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ type: 'GET_DOM_TREE_CDP', tabId: tab.id }, resp => {
-              if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-              else if (resp?.error) reject(new Error(resp.error));
-              else resolve(resp);
-            });
+      for (let step = 0; step < MAX_STEPS; step++) {
+        // Get semantic element list via CDP Accessibility tree
+        const domResult = await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage({ type: 'GET_DOM_TREE_CDP', tabId: tab.id }, resp => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else if (resp?.error) reject(new Error(resp.error));
+            else resolve(resp);
           });
+        });
 
-          // Embed-filter DOM to top 15 most relevant elements
-          const updateStep = (content) => setAgentMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
-          setAgentMsgs(m => [...m, { role: 'assistant', content: `⟳ ${stepLabel} — filtering ${domResult.count} elements…`, isAgent: true }]);
+        const updateStep = (content) => setAgentMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
+        setAgentMsgs(m => [...m, { role: 'assistant', content: `⟳ Filtering ${domResult.count} elements…`, isAgent: true }]);
 
-          const { text: filteredText, indexMap } = await __pc.embedFilter(
-            step, domResult.text, 15,
-            (status) => updateStep(`⟳ ${stepLabel} — ${status}`),
-          );
+        // Filter DOM to most relevant elements for the full goal
+        const { text: filteredText, indexMap } = await __pc.embedFilter(
+          initialGoal, domResult.text, 15,
+          (status) => updateStep(`⟳ ${status}`),
+        );
 
-          const keptCount = filteredText.split('\n').filter(Boolean).length;
-          updateStep(`⟳ ${stepLabel} — thinking… (top ${keptCount} elements)`);
+        const keptCount = filteredText.split('\n').filter(Boolean).length;
+        updateStep(`⟳ Thinking… (${keptCount} elements)`);
 
-          // Ask LLM what to do for this sub-step
-          const parsed = await __pc.agentStep(step, filteredText, []);
-          const action = parsed.action;
+        // Ask LLM what to do next — passes full goal + history of completed actions
+        const parsed = await __pc.agentStep(initialGoal, filteredText, actionHistory);
+        const action = parsed.action;
 
-          // Extract element label for display
-          const elLabel = (idx) => {
-            const line = filteredText.split('\n').find(l => l.startsWith(`[${idx}]`));
-            if (!line) return `[${idx}]`;
-            return `"${line.replace(/^\[\d+\]\s*/, '').slice(0, 50)}"`;
-          };
+        const elLabel = (idx) => {
+          const line = filteredText.split('\n').find(l => l.startsWith(`[${idx}]`));
+          if (!line) return `[${idx}]`;
+          return `"${line.replace(/^\[\d+\]\s*/, '').slice(0, 50)}"`;
+        };
 
-          // Summarise the action for display
-          let actionSummary;
-          if (action === 'click')         actionSummary = `click ${elLabel(parsed.index)}`;
-          else if (action === 'fill')     actionSummary = `fill ${elLabel(parsed.index)} → "${parsed.value}"`;
-          else if (action === 'scroll')   actionSummary = `scroll ${elLabel(parsed.index)} ${parsed.direction}`;
-          else if (action === 'navigate') actionSummary = `navigate ${parsed.url}`;
-          else if (action === 'done')     actionSummary = `done`;
-          else actionSummary = JSON.stringify(parsed);
+        let actionSummary;
+        if (action === 'click')         actionSummary = `click ${elLabel(parsed.index)}`;
+        else if (action === 'fill')     actionSummary = `fill ${elLabel(parsed.index)} → "${parsed.value}"`;
+        else if (action === 'scroll')   actionSummary = `scroll ${elLabel(parsed.index)} ${parsed.direction}`;
+        else if (action === 'navigate') actionSummary = `navigate ${parsed.url}`;
+        else if (action === 'done')     actionSummary = `done`;
+        else actionSummary = JSON.stringify(parsed);
 
-          updateStep(`→ ${actionSummary}`);
+        updateStep(`→ ${actionSummary}`);
 
-          // Model says this step is done — move to next sub-step
-          if (action === 'done') {
-            if (parsed.answer) setAgentMsgs(m => [...m, { role: 'assistant', content: parsed.answer }]);
-            break;
-          }
-
-          // Translate re-indexed LLM index → original CDP tree index
-          const origIndex = (indexMap && parsed.index != null) ? (indexMap[parsed.index] ?? parsed.index) : parsed.index;
-
-          // Execute action via CDP
-          if (action === 'navigate') {
-            chrome.tabs.update(tab.id, { url: parsed.url });
-            await sleep(1500);
-            await reattach();
-            break; // navigation = step complete, move on
-          } else {
-            const urlBefore = await getTabUrl();
-            const result = await new Promise(resolve => {
-              chrome.runtime.sendMessage({
-                type: 'EXECUTE_ACTION_CDP',
-                tabId: tab.id,
-                action,
-                index: origIndex,
-                value: parsed.value,
-                direction: parsed.direction,
-              }, resp => {
-                void chrome.runtime.lastError;
-                resolve(resp ?? { ok: false, error: 'no response' });
-              });
-            });
-            if (result && !result.ok) {
-              updateStep(`→ ${actionSummary} [failed: ${result.error}]`);
-            }
-            await sleep(800);
-
-            // Heuristic step completion — no LLM call needed:
-            // fill: one try is enough (field is now filled)
-            // click: if URL changed the link navigated → step done, re-attach CDP
-            if (action === 'fill') break;
-            if (action === 'click') {
-              const urlAfter = await getTabUrl();
-              if (urlAfter !== urlBefore) {
-                await sleep(500); // let new page settle
-                await reattach();
-                break;
-              }
-            }
-          }
-
-          // Brief pause to let WebGPU buffers release before next LLM call
-          await sleep(300);
+        if (action === 'done') {
+          if (parsed.answer) setAgentMsgs(m => [...m, { role: 'assistant', content: parsed.answer }]);
+          break;
         }
+
+        const origIndex = (indexMap && parsed.index != null) ? (indexMap[parsed.index] ?? parsed.index) : parsed.index;
+
+        if (action === 'navigate') {
+          chrome.tabs.update(tab.id, { url: parsed.url });
+          await sleep(1500);
+          await reattach();
+        } else {
+          const urlBefore = await getTabUrl();
+          const result = await new Promise(resolve => {
+            chrome.runtime.sendMessage({
+              type: 'EXECUTE_ACTION_CDP',
+              tabId: tab.id, action, index: origIndex,
+              value: parsed.value, direction: parsed.direction,
+            }, resp => { void chrome.runtime.lastError; resolve(resp ?? { ok: false, error: 'no response' }); });
+          });
+          if (result && !result.ok) updateStep(`→ ${actionSummary} [failed: ${result.error}]`);
+          await sleep(800);
+
+          // After a navigating click, re-attach CDP for the new page
+          if (action === 'click') {
+            const urlAfter = await getTabUrl();
+            if (urlAfter !== urlBefore) {
+              await sleep(500);
+              await reattach();
+            }
+          }
+        }
+
+        // Record what was done so the LLM knows on the next step
+        actionHistory.push(actionSummary);
+
+        await sleep(300);
       }
 
-      setAgentMsgs(m => [...m, { role: 'assistant', content: '✓ All steps complete', isAgent: true }]);
+      setAgentMsgs(m => [...m, { role: 'assistant', content: '✓ Done', isAgent: true }]);
     } catch (e) {
       if (e.message?.includes('Extension context invalidated')) {
         window.location.reload();
@@ -836,7 +797,6 @@ function App() {
     } finally {
       chrome.runtime.sendMessage({ type: 'AGENT_STOP', tabId: tab.id }, () => void chrome.runtime.lastError);
       setAgentBusy(false);
-      // agentMsgs will be cleared when agentBusy flips — see render logic
     }
   };
 
