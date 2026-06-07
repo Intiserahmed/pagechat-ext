@@ -41,7 +41,11 @@
       "sidepanel/vendor/react-dom.js",
       "lib/wllama.js",
       "lib/wllama.wasm",
-      "lib/wllama-bridge.js"
+      "lib/wllama-bridge.js",
+      "lib/embed-ort.js",
+      "lib/ort.min.js",
+      "lib/ort-wasm-simd-threaded.wasm",
+      "lib/bge-vocab.txt"
     ],
     "matches": ["<all_urls>"]
   }],
