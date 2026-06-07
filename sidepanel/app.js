@@ -783,6 +783,11 @@ function App() {
         // Brief pause to let WebGPU buffers release before next LLM call
         await sleep(300);
 
+        // For fill/scroll actions the agent must keep running — a 1B SLM can't count
+        // remaining fields so remainingGoal always says "done" after the first fill.
+        // Only check completion after click/navigate (natural task boundaries).
+        if (action === 'fill' || action === 'scroll') continue;
+
         // Ask model what goal remains after this action
         setMsgs(m => [...m, { role: 'assistant', content: `⟳ Evaluating remaining goal…`, isAgent: true }]);
         const remaining = await __pc.remainingGoal(goal, actionSummary);
@@ -802,6 +807,11 @@ function App() {
         goal = remaining; // narrow the goal for next step
       }
     } catch (e) {
+      if (e.message?.includes('Extension context invalidated')) {
+        // SW was killed mid-run — panel will auto-reload
+        window.location.reload();
+        return;
+      }
       setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
     } finally {
       // Detach debugger when agent loop ends

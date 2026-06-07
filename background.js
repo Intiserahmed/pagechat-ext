@@ -226,12 +226,9 @@ async function cdpExecuteAction(tabId, action, index, value, direction) {
   };
 
   if (action === 'click') {
-    const r = await getRect();
-    await new Promise(res => setTimeout(res, 80)); // brief settle after scroll
-    const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-    for (const type of ['mousePressed', 'mouseReleased']) {
-      await cdpSend(tabId, 'Input.dispatchMouseEvent', { type, x: cx, y: cy, button: 'left', clickCount: 1 });
-    }
+    // element.click() triggers browser navigation for <a> links and fires all event
+    // listeners — more reliable than coordinate-based mouse events for any element type.
+    await callOn('function() { this.scrollIntoView({block:"center",behavior:"instant"}); this.click(); }');
   } else if (action === 'fill') {
     await callOn('function() { this.scrollIntoView({block:"center",behavior:"instant"}); this.focus(); this.select(); }');
     await new Promise(res => setTimeout(res, 80));
