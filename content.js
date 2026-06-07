@@ -163,7 +163,92 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     reply({ count: fillFields(msg.fills) });
     return true;
   }
+  if (msg.type === 'GET_TRANSCRIPT') {
+    extractYouTubeTranscript().then(result => reply(result)).catch(() => reply(null));
+    return true;
+  }
 });
+
+// ── YouTube transcript extraction via InnerTube API ───────────────────────
+const YT_CLIENTS = [
+  { clientName: 'IOS',        clientVersion: '20.10.4',          userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)' },
+  { clientName: 'ANDROID_VR', clientVersion: '1.62.20',          userAgent: 'com.google.android.apps.youtube.vr.oculus/1.62.20 (Linux; U; Android 12L; eureka-user Build/SQ3A)' },
+  { clientName: 'MWEB',       clientVersion: '2.20251209.01.00', userAgent: 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/112 Mobile Safari/537.36' },
+];
+
+async function extractYouTubeTranscript() {
+  const videoId = new URLSearchParams(location.search).get('v');
+  if (!videoId) return null;
+
+  // Try each client profile until one returns captions
+  for (const client of YT_CLIENTS) {
+    const result = await tryInnerTube(videoId, client);
+    if (result) return result;
+  }
+  return null;
+}
+
+async function tryInnerTube(videoId, client) {
+  const resp = await fetch(
+    'https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type':            'application/json',
+        'X-YouTube-Client-Name':   client.clientName === 'IOS' ? '5' : client.clientName === 'ANDROID_VR' ? '28' : '2',
+        'X-YouTube-Client-Version': client.clientVersion,
+        'User-Agent':              client.userAgent,
+        'Origin':                  'https://www.youtube.com',
+      },
+      body: JSON.stringify({
+        context: {
+          client: { clientName: client.clientName, clientVersion: client.clientVersion, hl: 'en', gl: 'US' },
+          user:    { lockedSafetyMode: false },
+          request: { useSsl: true },
+        },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk:    true,
+      }),
+    }
+  ).catch(() => null);
+
+  if (!resp?.ok) return null;
+  const data = await resp.json().catch(() => null);
+  if (!data) return null;
+
+  const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (!tracks?.length) return null;
+
+  const track = tracks.find(t => t.languageCode === 'en')
+             || tracks.find(t => t.languageCode?.startsWith('en'))
+             || tracks[0];
+  if (!track?.baseUrl) return null;
+
+  // Fetch JSON3 captions
+  const xml = await fetch(track.baseUrl + '&fmt=json3', {
+    headers: { 'User-Agent': client.userAgent },
+  }).then(r => r.text()).catch(() => null);
+  if (!xml) return null;
+
+  // Parse JSON3 format
+  try {
+    const json = JSON.parse(xml);
+    const text = (json.events || [])
+      .filter(e => e.segs && e.aAppend !== 1)
+      .map(e => e.segs.map(s => s.utf8 || '').join(''))
+      .join(' ').replace(/\s+/g, ' ').trim();
+    if (text.length > 100) return { text, title: document.title };
+  } catch {}
+
+  // Fallback: parse XML captions
+  const text = [...xml.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)]
+    .map(m => m[1]
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/<[^>]+>/g, ''))
+    .join(' ').replace(/\s+/g, ' ').trim();
+  return text.length > 100 ? { text, title: document.title } : null;
+}
 
 // ── FAB overlay injection ──────────────────────────────────────────────────
 (function injectFAB() {
@@ -203,8 +288,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
         70%  { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 9px rgba(200,242,78,0); }
         100% { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 0   rgba(200,242,78,0); }
       }
-      .fab svg   { transition: transform .2s ease; }
+      .fab svg { transition: transform .2s ease; }
       .fab.open svg { transform: rotate(90deg); }
+
+      /* tap burst — two expanding rings */
+      .fab::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        pointer-events: none;
+      }
+      .fab.tapped::after { animation: fabBurst .6s ease-out forwards; }
+      @keyframes fabBurst {
+        0%   { box-shadow: 0 0 0 0   rgba(200,242,78,.8), 0 0 0 0   rgba(200,242,78,.4); }
+        50%  { box-shadow: 0 0 0 14px rgba(200,242,78,.15),0 0 0 28px rgba(200,242,78,.08); }
+        100% { box-shadow: 0 0 0 22px rgba(200,242,78,0),  0 0 0 44px rgba(200,242,78,0); }
+      }
+      /* icon squeeze + bounce on tap */
+      .fab.tapped svg { animation: fabBounce .4s cubic-bezier(.36,.07,.19,.97) forwards; }
+      @keyframes fabBounce {
+        0%   { transform: scale(1); }
+        25%  { transform: scale(.78) rotate(-10deg); }
+        60%  { transform: scale(1.2) rotate(6deg); }
+        100% { transform: scale(1)  rotate(0deg); }
+      }
+
 
       .chat-wrap {
         position: fixed;
@@ -239,7 +348,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
 
     <button class="fab" id="fab" title="PageChat">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        <!-- Mirrored chat bubble (tail bottom-right) -->
+        <g transform="translate(24,0) scale(-1,1)">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </g>
+        <!-- ✦ ✦ ✦ three sparkles like typing dots -->
+        <path fill="currentColor" stroke="none" d="
+          M9  7.8l.4 1.1 1.1.4-1.1.4L9  10.8l-.4-1.1-1.1-.4 1.1-.4z
+          M12 7.8l.4 1.1 1.1.4-1.1.4L12 10.8l-.4-1.1-1.1-.4 1.1-.4z
+          M15 7.8l.4 1.1 1.1.4-1.1.4L15 10.8l-.4-1.1-1.1-.4 1.1-.4z
+        "/>
       </svg>
     </button>
 
@@ -256,6 +374,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     open = !open;
     fab.classList.toggle('open', open);
     chatWrap.classList.toggle('open', open);
+    // Tap burst animation
+    fab.classList.remove('tapped');
+    void fab.offsetWidth; // reflow to restart animation
+    fab.classList.add('tapped');
+    fab.addEventListener('animationend', () => fab.classList.remove('tapped'), { once: true });
   });
 
   // Close on Escape

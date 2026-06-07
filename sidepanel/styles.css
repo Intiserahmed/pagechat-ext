@@ -227,16 +227,6 @@ body {
 .btn-sm { padding: 4px 10px; font-size: 9px; }
 
 /* ── Footer ── */
-.footer {
-  font-family: var(--mono);
-  font-size: 8px;
-  color: var(--muted);
-  text-align: center;
-  padding: 6px;
-  border-top: 1px solid var(--line);
-  letter-spacing: .06em;
-  flex-shrink: 0;
-}
 
 /* ── Settings panel ── */
 .settings { display: flex; flex-direction: column; gap: 10px; padding: 14px 14px 20px; }

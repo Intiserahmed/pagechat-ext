@@ -487,6 +487,7 @@ function App() {
 
       const run = async () => {
         setSuggestions([]);
+        if (isYouTubeVideo(url)) return; // YouTube: wait for user to trigger
         const hit = await __pc.restoreFromCache(url);
         if (!hit) {
           handleIndex();
@@ -540,6 +541,8 @@ function App() {
       });
     }
   }, [status, useEmbed, settings.autoIndex]);
+
+  const isYouTubeVideo = (url) => /youtube\.com\/watch/.test(url);
 
   const handleLoad = () => __pc.loadModels();
 
@@ -645,14 +648,52 @@ function App() {
     }
   };
 
+  const handleVideoSummarize = async () => {
+    if (busy || !isReady) return;
+    setBusy(true);
+    setMsgs(m => [...m,
+      { role: 'user', content: 'Summarize this video' },
+      { role: 'assistant', content: '', thinking: 'Extracting transcript…' },
+    ]);
+    const updateLast = (patch) => setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], ...patch }; return n; });
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const result = await Promise.race([
+        new Promise(res => chrome.tabs.sendMessage(tab.id, { type: 'GET_TRANSCRIPT' }, res)),
+        new Promise(res => setTimeout(() => res(null), 8000)),
+      ]);
+      if (!result?.text) {
+        updateLast({ content: 'No transcript found for this video. It may not have captions enabled.', thinking: '' });
+        setBusy(false);
+        return;
+      }
+      updateLast({ thinking: 'Indexing transcript…' });
+      await new Promise(res => {
+        __pc.indexPage(result.text, tab.url);
+        // Wait for indexing to complete
+        const unsub = __pc.subscribe(s => { if (s.status === 'ready') { unsub(); res(); } });
+      });
+      updateLast({ thinking: 'Summarizing…' });
+      await __pc.summarize(
+        token => setMsgs(m => { const n = [...m], last = n[n.length-1]; n[n.length-1] = { ...last, content: last.content + token }; return n; }),
+        progress => updateLast({ thinking: progress }),
+      );
+      setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], thinking: '' }; return n; });
+    } catch(e) {
+      updateLast({ content: 'Error: ' + e.message, thinking: '' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const send = async (text) => {
     text = text.trim();
     if (!text || busy || !isReady) return;
 
-    const SUMMARIZE_RE = /\b(summarize|summary|tldr|tl;dr|overview|brief me|give me a summary|what is this( page| article| about)?)\b/i;
+    const SUMMARIZE_RE = /\b(summarize|summary|tldr|tl;dr|overview|brief me|give me a summary|what is this( page| article| video| about)?)\b/i;
     if (SUMMARIZE_RE.test(text)) {
       setInput('');
-      handleSummarize();
+      isYouTubeVideo(pageInfo.url) ? handleVideoSummarize() : handleSummarize();
       return;
     }
 
@@ -811,22 +852,25 @@ function App() {
           disabled: busy,
           autoFocus: true,
         }),
-        isReady && !busy && h('button', {
-          className: 'btn-ghost btn-sm',
-          onClick: handleSummarize,
-          title: 'Summarize this page',
-          style: { flexShrink: 0 },
-        }, Ic.summarize()),
+        isReady && !busy && isYouTubeVideo(pageInfo.url)
+          ? h('button', {
+              className: 'btn-ghost btn-sm',
+              onClick: handleVideoSummarize,
+              title: 'Summarize this video',
+              style: { flexShrink: 0 },
+            }, '▶ Summarize')
+          : isReady && !busy && h('button', {
+              className: 'btn-ghost btn-sm',
+              onClick: handleSummarize,
+              title: 'Summarize this page',
+              style: { flexShrink: 0 },
+            }, Ic.summarize()),
         busy
           ? h('button', { className: 'btn-stop', onClick: () => __pc.stop(), title: 'Stop generating' }, Ic.stop())
           : h('button', { className: 'btn-send', onClick: () => send(input), disabled: !input.trim() }, Ic.send()),
       ),
     ),
 
-    // Footer
-    h('div', { className: 'footer' },
-      '⊗ 0 bytes egress · ' + __pc.chunkCount + ' chunks · ' + __pc.cachedPages + ' pages cached',
-    ),
   );
 }
 

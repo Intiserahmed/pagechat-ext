@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Lime green rounded square background -->
+  <rect width="128" height="128" rx="28" fill="#c8f24e"/>
+
+  <!-- Mirrored chat bubble (tail bottom-right), dark fill -->
+  <g transform="translate(128,0) scale(-1,1)">
+    <path d="M104 80a10 10 0 0 1-10 10H36l-22 22V26a10 10 0 0 1 10-10h80a10 10 0 0 1 10 10z"
+          fill="#0c0e0b" stroke="none"/>
+  </g>
+
+  <!-- Three ✦ sparkles inside bubble (lime on dark bubble) -->
+  <!-- Left sparkle at ~(42, 52) -->
+  <path fill="#c8f24e" stroke="none"
+        d="M42 40 l5 12 12 5 -12 5 L42 74 l-5-12 -12-5 12-5z"/>
+  <!-- Middle sparkle at ~(64, 52) -->
+  <path fill="#c8f24e" stroke="none"
+        d="M64 40 l5 12 12 5 -12 5 L64 74 l-5-12 -12-5 12-5z"/>
+  <!-- Right sparkle at ~(86, 52) -->
+  <path fill="#c8f24e" stroke="none"
+        d="M86 40 l5 12 12 5 -12 5 L86 74 l-5-12 -12-5 12-5z"/>
+</svg>
