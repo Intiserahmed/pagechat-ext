@@ -685,12 +685,26 @@ function App() {
     const MAX_STEPS = 8;
     const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
 
+    // Attach CDP debugger for the agent session
+    const attachResult = await new Promise(resolve => {
+      chrome.runtime.sendMessage({ type: 'AGENT_START', tabId: tab.id }, r => {
+        void chrome.runtime.lastError;
+        resolve(r ?? { ok: false, error: 'no response' });
+      });
+    });
+    if (!attachResult.ok) {
+      setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + attachResult.error }]);
+      setAgentBusy(false);
+      return;
+    }
+
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
-        // Get semantically-filtered DOM tree for this goal
+        // Get semantic element list via CDP Accessibility tree
         const domResult = await new Promise((resolve, reject) => {
-          chrome.tabs.sendMessage(tab.id, { type: 'GET_DOM_TREE', goal }, resp => {
+          chrome.runtime.sendMessage({ type: 'GET_DOM_TREE_CDP', tabId: tab.id }, resp => {
             if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else if (resp?.error) reject(new Error(resp.error));
             else resolve(resp);
           });
         });
@@ -711,21 +725,20 @@ function App() {
         const parsed = await __pc.agentStep(goal, filteredText, []);
         const action = parsed.action;
 
-        // Extract element label from domResult.text for a given index
+        // Extract element label from the (possibly filtered) text for display
         const elLabel = (idx) => {
-          const line = domResult.text.split('\n').find(l => l.startsWith(`[${idx}]`));
+          const line = filteredText.split('\n').find(l => l.startsWith(`[${idx}]`));
           if (!line) return `[${idx}]`;
-          const after = line.replace(/^\[\d+\]\s*/, ''); // strip "[N] "
-          return `"${after.slice(0, 50)}"`;
+          return `"${line.replace(/^\[\d+\]\s*/, '').slice(0, 50)}"`;
         };
 
         // Summarise the action for display
         let actionSummary;
-        if (action === 'click')       actionSummary = `click ${elLabel(parsed.index)}`;
-        else if (action === 'fill')   actionSummary = `fill ${elLabel(parsed.index)} → "${parsed.value}"`;
-        else if (action === 'scroll') actionSummary = `scroll ${elLabel(parsed.index)} ${parsed.direction}`;
+        if (action === 'click')         actionSummary = `click ${elLabel(parsed.index)}`;
+        else if (action === 'fill')     actionSummary = `fill ${elLabel(parsed.index)} → "${parsed.value}"`;
+        else if (action === 'scroll')   actionSummary = `scroll ${elLabel(parsed.index)} ${parsed.direction}`;
         else if (action === 'navigate') actionSummary = `navigate ${parsed.url}`;
-        else if (action === 'done')   actionSummary = `done`;
+        else if (action === 'done')     actionSummary = `done`;
         else actionSummary = JSON.stringify(parsed);
 
         // Update step message with actual action
@@ -736,24 +749,39 @@ function App() {
           break;
         }
 
-        // Translate LLM's re-indexed index → original _domMap index
+        // Translate LLM's re-indexed index → original CDP tree index
         const origIndex = (indexMap && parsed.index != null) ? (indexMap[parsed.index] ?? parsed.index) : parsed.index;
 
-        // Execute action on page
-        let actionResult = 'ok';
+        // Execute action via CDP (background.js uses backendNodeId for reliability)
         if (action === 'navigate') {
           chrome.tabs.update(tab.id, { url: parsed.url });
           await sleep(1500);
+          // Re-attach after navigation
+          await new Promise(resolve => {
+            chrome.runtime.sendMessage({ type: 'AGENT_START', tabId: tab.id }, r => { void chrome.runtime.lastError; resolve(r); });
+          });
         } else {
           const result = await new Promise(resolve => {
-            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action, index: origIndex, value: parsed.value, direction: parsed.direction }, resp => {
+            chrome.runtime.sendMessage({
+              type: 'EXECUTE_ACTION_CDP',
+              tabId: tab.id,
+              action,
+              index: origIndex,
+              value: parsed.value,
+              direction: parsed.direction,
+            }, resp => {
               void chrome.runtime.lastError;
-              resolve(resp);
+              resolve(resp ?? { ok: false, error: 'no response' });
             });
           });
-          if (result && !result.ok) actionResult = 'failed: ' + result.error;
+          if (result && !result.ok) {
+            setMsgs(m => { const n = [...m]; n[n.length - 1] = { ...n[n.length - 1], content: `→ ${actionSummary} [failed: ${result.error}]` }; return n; });
+          }
           await sleep(800);
         }
+
+        // Brief pause to let WebGPU buffers release before next LLM call
+        await sleep(300);
 
         // Ask model what goal remains after this action
         setMsgs(m => [...m, { role: 'assistant', content: `⟳ Evaluating remaining goal…`, isAgent: true }]);
@@ -762,11 +790,22 @@ function App() {
         setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content: isDone ? `✓ Goal complete` : `↳ Remaining: ${remaining}` }; return n; });
 
         if (isDone) break;
+
+        // Stuck detection — if remaining goal is identical to current goal (model made no progress)
+        // Normalise before comparing: lowercase, collapse spaces, strip trailing punctuation
+        const norm = s => s.trim().toLowerCase().replace(/\s+/g, ' ').replace(/[.!?]+$/, '');
+        if (norm(remaining) === norm(goal)) {
+          setMsgs(m => [...m, { role: 'assistant', content: `Stuck — "${actionSummary}" had no effect. Stopping.` }]);
+          break;
+        }
+
         goal = remaining; // narrow the goal for next step
       }
     } catch (e) {
       setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
     } finally {
+      // Detach debugger when agent loop ends
+      chrome.runtime.sendMessage({ type: 'AGENT_STOP', tabId: tab.id }, () => void chrome.runtime.lastError);
       setAgentBusy(false);
     }
   };

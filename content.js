@@ -180,9 +180,10 @@ function executeAgentAction(action, index, value, direction) {
 // ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === 'GET_DOM_TREE') {
-    // Build full DOM tree; HTML-heuristics pre-filter to 40 candidates for embed re-ranking
     let result = buildDomTree();
-    if (msg.goal) result = filterByGoal(result, msg.goal, 40);
+    // Only apply HTML heuristics pre-filter when there are many elements (> 30).
+    // On small pages, filtering risks hiding the very element the user wants.
+    if (msg.goal && result.count > 30) result = filterByGoal(result, msg.goal, 40);
     _domMap = result.map;
     reply({ text: result.text, count: result.count });
     return true;
