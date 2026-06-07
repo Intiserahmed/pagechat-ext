@@ -782,29 +782,6 @@ function App() {
 
         // Brief pause to let WebGPU buffers release before next LLM call
         await sleep(300);
-
-        // For fill/scroll actions the agent must keep running — a 1B SLM can't count
-        // remaining fields so remainingGoal always says "done" after the first fill.
-        // Only check completion after click/navigate (natural task boundaries).
-        if (action === 'fill' || action === 'scroll') continue;
-
-        // Ask model what goal remains after this action
-        setMsgs(m => [...m, { role: 'assistant', content: `⟳ Evaluating remaining goal…`, isAgent: true }]);
-        const remaining = await __pc.remainingGoal(goal, actionSummary);
-        const isDone = /^done\.?$/i.test(remaining.trim()) || remaining.trim() === '';
-        setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content: isDone ? `✓ Goal complete` : `↳ Remaining: ${remaining}` }; return n; });
-
-        if (isDone) break;
-
-        // Stuck detection — if remaining goal is identical to current goal (model made no progress)
-        // Normalise before comparing: lowercase, collapse spaces, strip trailing punctuation
-        const norm = s => s.trim().toLowerCase().replace(/\s+/g, ' ').replace(/[.!?]+$/, '');
-        if (norm(remaining) === norm(goal)) {
-          setMsgs(m => [...m, { role: 'assistant', content: `Stuck — "${actionSummary}" had no effect. Stopping.` }]);
-          break;
-        }
-
-        goal = remaining; // narrow the goal for next step
       }
     } catch (e) {
       if (e.message?.includes('Extension context invalidated')) {
