@@ -109,6 +109,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         });
       break;
 
+    case 'PC_CMD_AGENT_STEP':
+      pc.agentStep(msg.goal, msg.domTree, msg.history)
+        .then(action => {
+          chrome.runtime.sendMessage({ type: 'PC_AGENT_RESULT', tabId: msg.tabId, action }).catch(() => {});
+        })
+        .catch(e => {
+          chrome.runtime.sendMessage({ type: 'PC_ERROR', tabId: msg.tabId, message: e.message }).catch(() => {});
+        });
+      break;
+
     case 'PC_CMD_CHAT':
       pc.chat(
         msg.messages,

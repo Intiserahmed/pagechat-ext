@@ -135,6 +135,35 @@ body {
 .msg-ai .md-li + .md-li { margin-top: 2px; }
 .msg-ai code { font-family: var(--mono); font-size: 11px; background: rgba(200,242,78,.1); border-radius: 3px; padding: 1px 5px; color: var(--green); }
 
+.msg-agent {
+  background: transparent;
+  color: var(--muted);
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 3px 8px;
+  border-left: 2px solid var(--green);
+  border-radius: 0;
+  max-width: 100%;
+}
+
+.btn-agent {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 1px solid rgba(200,242,78,.35);
+  color: var(--green);
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 14px;
+  transition: border-color .15s, background .15s;
+}
+.btn-agent:hover:not(:disabled) { border-color: var(--green); background: rgba(200,242,78,.08); }
+.btn-agent:disabled { opacity: .3; cursor: not-allowed; }
+
 .cur { color: var(--green); animation: blink .9s step-end infinite; }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
 

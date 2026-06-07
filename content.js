@@ -142,8 +142,50 @@ function fillFields(fills) {
   return count;
 }
 
+// ── Agent DOM map — persists element refs between GET_DOM_TREE and EXECUTE_ACTION ──
+let _domMap = {};
+
+function executeAgentAction(action, index, value, direction) {
+  const el = _domMap[index];
+  if (!el) return { ok: false, error: `element ${index} not found` };
+
+  try {
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+
+    if (action === 'click') {
+      el.focus();
+      el.click();
+    } else if (action === 'fill') {
+      el.focus();
+      // Use native setter so React/Vue state updates fire correctly
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+                  : el instanceof HTMLSelectElement   ? HTMLSelectElement.prototype
+                                                      : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(el, String(value)); else el.value = String(value);
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (action === 'scroll') {
+      el.scrollBy(0, direction === 'up' ? -400 : 400);
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (msg.type === 'GET_DOM_TREE') {
+    const { text, map, count } = buildDomTree();
+    _domMap = map;
+    reply({ text, count });
+    return true;
+  }
+  if (msg.type === 'EXECUTE_ACTION') {
+    reply(executeAgentAction(msg.action, msg.index, msg.value, msg.direction));
+    return true;
+  }
   if (msg.type === 'GET_PAGE_CONTENT') {
     const doExtract = () => {
       reply({ title: document.title, url: location.href, text: extractPage() });

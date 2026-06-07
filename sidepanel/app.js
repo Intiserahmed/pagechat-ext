@@ -24,6 +24,7 @@ const __pc = (() => {
   let _suggestResolve    = null;
   let _fillResolve       = null;
   let _knowledgeResolve  = null;
+  let _agentResolve      = null;
   let _stopped           = false;
 
   // Cache this iframe's tab ID so we can filter tab-targeted messages.
@@ -81,6 +82,13 @@ const __pc = (() => {
         if (msg.tabId === _myTabId && _knowledgeResolve) {
           _knowledgeResolve();
           _knowledgeResolve = null;
+        }
+        break;
+
+      case 'PC_AGENT_RESULT':
+        if (msg.tabId === _myTabId && _agentResolve) {
+          _agentResolve(msg.action);
+          _agentResolve = null;
         }
         break;
     }
@@ -206,6 +214,15 @@ const __pc = (() => {
             _chatCbs = null;
             reject(err);
           });
+      });
+    },
+
+    /** Single agent reasoning step. Returns Promise<string> action line. */
+    agentStep(goal, domTree, history) {
+      return new Promise((resolve, reject) => {
+        _agentResolve = resolve;
+        chrome.runtime.sendMessage({ type: 'PC_CMD_AGENT_STEP', goal, domTree, history, tabId: _myTabId })
+          .catch(err => { _agentResolve = null; reject(err); });
       });
     },
 
@@ -416,13 +433,16 @@ function App() {
   const [msgs, setMsgs]         = useState([]);
   const [input, setInput]       = useState('');
   const [busy, setBusy]         = useState(false);
+  const [agentBusy, setAgentBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [suggestions, setSuggestions]         = useState([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState('idle'); // idle | indexing | ready
-  const bottomRef   = useRef(null);
-  const settingsRef = useRef(settings);
+  const bottomRef     = useRef(null);
+  const settingsRef   = useRef(settings);
   const currentUrlRef = useRef('');
+  const loadTabRef    = useRef(null);   // lets status effect re-trigger loadTab
+  const prevStatusRef = useRef('idle'); // tracks previous status for transition detection
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const { status, progress, useEmbed } = state;
@@ -500,27 +520,61 @@ function App() {
       debounce = immediate ? (run(), null) : setTimeout(run, 400);
     };
 
+    // Expose loadTab so the status-watching effect can re-trigger it when model becomes ready
+    loadTabRef.current = loadTab;
+
     // Initial load — run immediately
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab, true));
 
-    // Persistent port — background pushes tab-change events through this reliably.
-    // chrome.runtime.sendMessage has no delivery guarantee to sidepanels.
-    const port = chrome.runtime.connect({ name: 'sidepanel' });
-    port.onMessage.addListener((msg) => {
-      if (msg.type === 'TAB_UPDATED' && msg.url) {
-        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-          loadTab({ ...tab, url: msg.url });
-        });
-      } else if (msg.type === 'TAB_CHANGED') {
-        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab));
-      }
-    });
+    // Persistent port — background pushes tab-change events reliably.
+    // Auto-reconnects when the service worker is killed and restarts.
+    let port;
+    const connectPort = () => {
+      port = chrome.runtime.connect({ name: 'sidepanel' });
+      port.onMessage.addListener((msg) => {
+        if (msg.type === 'TAB_UPDATED' && msg.url) {
+          chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+            loadTab({ ...tab, url: msg.url });
+          });
+        } else if (msg.type === 'TAB_CHANGED') {
+          chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab));
+        }
+      });
+      port.onDisconnect.addListener(() => {
+        // SW was killed — reconnect and request fresh state so sidepanel un-grays
+        setTimeout(() => {
+          connectPort();
+          chrome.runtime.sendMessage({ type: 'PC_CMD_STATE' }, cached => {
+            void chrome.runtime.lastError;
+            if (cached) setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed });
+          });
+          // Ask model host to re-broadcast its actual status
+          chrome.runtime.sendMessage({ type: 'PC_CMD_STATE_REQ' }).catch(() => {});
+        }, 200);
+      });
+    };
+    connectPort();
+
     return () => { port.disconnect(); clearTimeout(debounce); };
   }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [msgs]);
+
+  // Re-trigger loadTab when model transitions from loading → ready.
+  // loadTab exits early while the model loads, so the page never indexes after first open.
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = status;
+    const wasLoading = prev === 'idle' || prev === 'loading-embed' || prev === 'loading-chat';
+    const isNowReady = status === 'ready' || status === 'ready-no-index';
+    if (wasLoading && isNowReady && loadTabRef.current) {
+      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        if (tab) loadTabRef.current(tab);
+      });
+    }
+  }, [status]);
 
   // Generate suggestions once page is freshly indexed
   useEffect(() => {
@@ -549,6 +603,87 @@ function App() {
   }, [status, useEmbed, settings.autoIndex]);
 
   const isYouTubeVideo = (url) => /youtube\.com\/watch/.test(url);
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function parseAgentAction(raw) {
+    const s = raw.trim();
+    const clickM  = s.match(/^click\s+(\d+)/i);
+    if (clickM)  return { type: 'click',    index: parseInt(clickM[1]) };
+    const fillM   = s.match(/^fill\s+(\d+)\s+([\s\S]+)/i);
+    if (fillM)   return { type: 'fill',     index: parseInt(fillM[1]), value: fillM[2].replace(/^["']|["']$/g, '') };
+    const scrollM = s.match(/^scroll\s+(\d+)\s+(down|up)/i);
+    if (scrollM) return { type: 'scroll',   index: parseInt(scrollM[1]), direction: scrollM[2].toLowerCase() };
+    const navM    = s.match(/^navigate\s+(https?:\/\/\S+)/i);
+    if (navM)    return { type: 'navigate', url: navM[1] };
+    const doneM   = s.match(/^done\s*([\s\S]*)/i);
+    if (doneM)   return { type: 'done',     answer: doneM[1].replace(/^["']|["']$/g, '').trim() };
+    return { type: 'unknown', raw: s };
+  }
+
+  const runAgent = async (goal) => {
+    if (agentBusy || !goal.trim()) return;
+    setAgentBusy(true);
+    setInput('');
+    setMsgs(m => [...m, { role: 'user', content: goal }]);
+
+    const history = [];
+    const MAX_STEPS = 8;
+
+    const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
+
+    try {
+      for (let step = 0; step < MAX_STEPS; step++) {
+        // Get current DOM tree from the page
+        const domResult = await new Promise((resolve, reject) => {
+          chrome.tabs.sendMessage(tab.id, { type: 'GET_DOM_TREE' }, resp => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else resolve(resp);
+          });
+        });
+
+        // Placeholder step message
+        setMsgs(m => [...m, { role: 'assistant', content: `⟳ Thinking… (${domResult.count} elements)`, isAgent: true }]);
+
+        // Ask LLM what to do
+        const actionRaw = await __pc.agentStep(goal, domResult.text, history);
+        const parsed    = parseAgentAction(actionRaw);
+
+        // Update step message with actual action
+        setMsgs(m => { const n = [...m]; n[n.length - 1] = { role: 'assistant', content: `→ ${actionRaw}`, isAgent: true }; return n; });
+
+        if (parsed.type === 'done') {
+          if (parsed.answer) setMsgs(m => [...m, { role: 'assistant', content: parsed.answer }]);
+          break;
+        }
+
+        if (parsed.type === 'unknown') {
+          setMsgs(m => [...m, { role: 'assistant', content: `Couldn't parse action: "${actionRaw}" — stopping.` }]);
+          break;
+        }
+
+        history.push(actionRaw);
+
+        // Execute action on page
+        if (parsed.type === 'navigate') {
+          chrome.tabs.update(tab.id, { url: parsed.url });
+          await sleep(1500);
+        } else {
+          await new Promise(resolve => {
+            chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action: parsed.type, index: parsed.index, value: parsed.value, direction: parsed.direction }, () => {
+              void chrome.runtime.lastError;
+              resolve();
+            });
+          });
+          await sleep(800);
+        }
+      }
+    } catch (e) {
+      setMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
+    } finally {
+      setAgentBusy(false);
+    }
+  };
 
   const handleLoad = () => __pc.loadModels();
 
@@ -837,6 +972,8 @@ function App() {
         msgs.map((m, i) =>
           m.role === 'user'
             ? h('div', { key: i, className: 'msg msg-user' }, m.content)
+            : m.isAgent
+            ? h('div', { key: i, className: 'msg msg-agent' }, m.content)
             : h('div', { key: i, className: 'msg msg-ai' },
                 m.thinking && h('details', { className: 'think-wrap', open: i === msgs.length - 1 && busy },
                   h('summary', { className: 'think-summary' }, 'Thinking'),
@@ -853,26 +990,32 @@ function App() {
           className: 'input',
           value: input,
           onChange: e => setInput(e.target.value),
-          onKeyDown: e => e.key === 'Enter' && send(input),
-          placeholder: 'Ask about this page…',
-          disabled: busy,
+          onKeyDown: e => e.key === 'Enter' && !agentBusy && send(input),
+          placeholder: agentBusy ? 'Agent running…' : 'Ask about this page…',
+          disabled: busy || agentBusy,
           autoFocus: true,
         }),
-        isReady && !busy && isYouTubeVideo(pageInfo.url)
+        isReady && !busy && !agentBusy && isYouTubeVideo(pageInfo.url)
           ? h('button', {
               className: 'btn-ghost btn-sm',
               onClick: handleVideoSummarize,
               title: 'Summarize this video',
               style: { flexShrink: 0 },
             }, '▶ Summarize')
-          : isReady && !busy && h('button', {
+          : isReady && !busy && !agentBusy && h('button', {
               className: 'btn-ghost btn-sm',
               onClick: handleSummarize,
               title: 'Summarize this page',
               style: { flexShrink: 0 },
             }, Ic.summarize()),
-        busy
-          ? h('button', { className: 'btn-stop', onClick: () => __pc.stop(), title: 'Stop generating' }, Ic.stop())
+        isReady && !busy && !agentBusy && h('button', {
+          className: 'btn-agent',
+          onClick: () => runAgent(input),
+          disabled: !input.trim(),
+          title: 'Run agent — Arkhon will act on the page to complete your goal',
+        }, '⚡'),
+        busy || agentBusy
+          ? h('button', { className: 'btn-stop', onClick: () => { __pc.stop(); setAgentBusy(false); }, title: 'Stop' }, Ic.stop())
           : h('button', { className: 'btn-send', onClick: () => send(input), disabled: !input.trim() }, Ic.send()),
       ),
     ),
