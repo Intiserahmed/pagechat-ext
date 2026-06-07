@@ -3,7 +3,7 @@
 
 import './lib/wllama-bridge.js';
 
-const pc = window.__pagechat;
+const pc = window.__arkhon;
 
 function broadcast() {
   chrome.runtime.sendMessage({

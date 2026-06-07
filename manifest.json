@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "PageChat",
-  "short_name": "PageChat",
+  "name": "Arkhon AI",
+  "short_name": "Arkhon",
   "version": "0.2.0",
-  "description": "Chat with any webpage. Local LLM + RAG — zero data sent to any server.",
+  "description": "Your local AI agent on every page. On-device LLM + RAG — zero data sent to any server.",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": ["<all_urls>"],
   "background": {
@@ -24,7 +24,7 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "PageChat",
+    "default_title": "Arkhon AI",
     "default_icon": {
       "16":  "icons/icon16.png",
       "32":  "icons/icon32.png",

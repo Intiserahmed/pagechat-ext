@@ -439,7 +439,7 @@ function App() {
   useEffect(() => {
     const url = currentUrlRef.current;
     if (!url || msgs.length === 0) return;
-    chrome.storage.session.set({ [`pagechat_msgs_${url}`]: msgs });
+    chrome.storage.session.set({ [`arkhon_msgs_${url}`]: msgs });
   }, [msgs]);
 
   // Bootstrap: get state from background cache, subscribe to future state changes
@@ -477,8 +477,8 @@ function App() {
       currentUrlRef.current = url;
 
       // Always restore chat history for this URL
-      chrome.storage.session.get(`pagechat_msgs_${url}`, stored => {
-        setMsgs(stored[`pagechat_msgs_${url}`] ?? []);
+      chrome.storage.session.get(`arkhon_msgs_${url}`, stored => {
+        setMsgs(stored[`arkhon_msgs_${url}`] ?? []);
       });
 
       if (!url.startsWith('http://') && !url.startsWith('https://')) return;
@@ -503,13 +503,19 @@ function App() {
     // Initial load — run immediately
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab, true));
 
-    const handler = (msg) => {
-      if (msg.type === 'TAB_CHANGED' || msg.type === 'TAB_UPDATED') {
+    // Persistent port — background pushes tab-change events through this reliably.
+    // chrome.runtime.sendMessage has no delivery guarantee to sidepanels.
+    const port = chrome.runtime.connect({ name: 'sidepanel' });
+    port.onMessage.addListener((msg) => {
+      if (msg.type === 'TAB_UPDATED' && msg.url) {
+        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+          loadTab({ ...tab, url: msg.url });
+        });
+      } else if (msg.type === 'TAB_CHANGED') {
         chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab));
       }
-    };
-    chrome.runtime.onMessage.addListener(handler);
-    return () => { chrome.runtime.onMessage.removeListener(handler); clearTimeout(debounce); };
+    });
+    return () => { port.disconnect(); clearTimeout(debounce); };
   }, []);
 
   useEffect(() => {
@@ -551,7 +557,7 @@ function App() {
       if (!tab?.id) return;
       const url = tab.url || '';
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
-        setMsgs([{ role: 'assistant', content: "PageChat can't access this page. Navigate to a regular website and try again." }]);
+        setMsgs([{ role: 'assistant', content: "Arkhon can't access this page. Navigate to a regular website and try again." }]);
         return;
       }
       chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTENT' }, (resp) => {
@@ -770,7 +776,7 @@ function App() {
     h('div', { className: 'hd' },
       h('div', { className: 'hd-l' },
         Ic.dot(isReady),
-        h('span', { className: 'hd-title' }, 'PageChat'),
+        h('span', { className: 'hd-title' }, 'Arkhon AI'),
       ),
       h('div', { className: 'hd-l', style: { gap: '6px' } },
         h('button', {

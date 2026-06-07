@@ -169,6 +169,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   }
 });
 
+
+// ── YouTube SPA navigation ────────────────────────────────────────────────
+// yt-navigate-finish fires after YouTube fully loads the new video — URL is settled.
+// Content scripts are persistent (unlike the SW), so this is reliable.
+if (location.hostname.includes('youtube.com')) {
+  let _lastYtUrl = location.href;
+  document.addEventListener('yt-navigate-finish', () => {
+    if (location.href !== _lastYtUrl) {
+      _lastYtUrl = location.href;
+      chrome.runtime.sendMessage({ type: 'YT_NAVIGATE', url: location.href }).catch(() => {});
+    }
+  });
+}
+
 // ── YouTube transcript extraction via InnerTube API ───────────────────────
 const YT_CLIENTS = [
   { clientName: 'IOS',        clientVersion: '20.10.4',          userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)' },
@@ -252,10 +266,10 @@ async function tryInnerTube(videoId, client) {
 
 // ── FAB overlay injection ──────────────────────────────────────────────────
 (function injectFAB() {
-  if (document.getElementById('pagechat-host')) return;
+  if (document.getElementById('arkhon-host')) return;
 
   const host = document.createElement('div');
-  host.id = 'pagechat-host';
+  host.id = 'arkhon-host';
   const shadow = host.attachShadow({ mode: 'open' });
   const frameUrl = chrome.runtime.getURL('sidepanel/index.html');
 
@@ -346,7 +360,7 @@ async function tryInnerTube(videoId, client) {
       }
     </style>
 
-    <button class="fab" id="fab" title="PageChat">
+    <button class="fab" id="fab" title="Arkhon AI">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <!-- Mirrored chat bubble (tail bottom-right) -->
         <g transform="translate(24,0) scale(-1,1)">

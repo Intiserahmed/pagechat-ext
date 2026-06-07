@@ -5,6 +5,21 @@ let _pendingReturnTabId = null;   // tab to restore focus to after model loads
 let _ensurePromise      = null;   // deduplicates concurrent ensureModelHost calls
 let _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
 
+// ── Persistent port to sidepanel ──────────────────────────────────────────────
+// chrome.runtime.sendMessage has no delivery guarantee to sidepanels.
+// A persistent port established by the sidepanel on open is reliable.
+let _sidepanelPort = null;
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'sidepanel') return;
+  _sidepanelPort = port;
+  port.onDisconnect.addListener(() => { _sidepanelPort = null; });
+});
+
+function notifySidepanel(msg) {
+  if (_sidepanelPort) _sidepanelPort.postMessage(msg);
+}
+
 async function ensureModelHost() {
   // If already in progress, wait for the same promise — prevents multiple tabs on concurrent calls
   if (_ensurePromise) return _ensurePromise;
@@ -51,21 +66,27 @@ chrome.tabs.onRemoved.addListener(tabId => {
   }
 });
 
-// ── Tab tracking (skip host tab) ─────────────────────────────────────────────
+// ── Tab tracking — notify sidepanel via port ──────────────────────────────────
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   if (tabId === _hostTabId) return;
-  chrome.tabs.sendMessage(tabId, { type: 'TAB_CHANGED' }).catch(() => {});
+  notifySidepanel({ type: 'TAB_CHANGED' });
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tabId === _hostTabId) return;
   if (changeInfo.status === 'complete' && tab.url) {
-    chrome.tabs.sendMessage(tabId, { type: 'TAB_UPDATED', url: tab.url }).catch(() => {});
+    notifySidepanel({ type: 'TAB_UPDATED', url: tab.url });
   }
 });
 
 // ── Message handling ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Content script relay: YouTube SPA navigation — push to sidepanel via port
+  if (msg.type === 'YT_NAVIGATE') {
+    notifySidepanel({ type: 'TAB_UPDATED', url: msg.url });
+    return;
+  }
+
   // Cache state broadcasts from the host tab
   if (msg.type === 'PC_STATE') {
     _cachedState = {
