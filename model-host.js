@@ -10,16 +10,25 @@ const pc = window.__arkhon;
 
 function broadcast() {
   chrome.runtime.sendMessage({
-    type:        'PC_STATE',
-    status:      pc.status,
-    progress:    pc.progress,
-    useEmbed:    pc.useEmbed,
-    chunkCount:  pc.chunkCount,
-    cachedPages: pc.cachedPages,
+    type:      'PC_STATE',
+    status:    pc.status,
+    progress:  pc.progress,
+    useEmbed:  pc.useEmbed,
+    modelBusy: pc._modelBusy ?? false,
+    busyTabId: pc._busyTabId ?? null,
   }).catch(() => {});
 }
 
-// Push state to all iframes on every change
+function broadcastTabState(tabId, status, progress) {
+  chrome.runtime.sendMessage({
+    type: 'PC_TAB_STATE',
+    tabId,
+    status,
+    progress,
+  }).catch(() => {});
+}
+
+// Push state to all iframes on every model state change
 pc.subscribe(() => broadcast());
 
 // Push initial state so any open iframes sync immediately
@@ -37,10 +46,9 @@ broadcast();
       if (i < MAX_ATTEMPTS - 1) {
         await new Promise(r => setTimeout(r, 2000 * (i + 1)));
       } else {
-        // All attempts failed — broadcast error so UI can show it
         chrome.runtime.sendMessage({
           type: 'PC_STATE', status: 'error', progress: 0,
-          useEmbed: false, chunkCount: 0, cachedPages: 0,
+          useEmbed: false, modelBusy: false, busyTabId: null,
         }).catch(() => {});
       }
     }
@@ -66,7 +74,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
 
     case 'PC_CMD_INDEX':
-      pc.indexPage(msg.text, msg.url).catch(console.error);
+      pc.indexPage(msg.text, msg.url, msg.tabId, ({ status, progress }) => {
+        broadcastTabState(msg.tabId, status, progress);
+      }).catch(e => {
+        broadcastTabState(msg.tabId, 'error', 0);
+        console.error('[arkhon] indexPage error:', e);
+      });
+      break;
+
+    case 'PC_CMD_HAS_INDEX':
+      sendResponse({ has: pc.hasIndex(msg.tabId) });
+      return true;
+
+    case 'PC_CMD_REMOVE_INDEX':
+      pc.removeIndex(msg.tabId);
       break;
 
     case 'PC_CMD_SET_EMBED':
@@ -77,14 +98,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       broadcast();
       break;
 
-    case 'PC_CMD_RESTORE': {
-      const hit = pc.restoreFromCache(msg.url);
-      sendResponse({ hit });
-      return true;
-    }
-
     case 'PC_CMD_SUGGEST':
-      pc.suggestQuestions()
+      pc.suggestQuestions(msg.tabId)
         .then(questions => {
           chrome.runtime.sendMessage({ type: 'PC_SUGGESTIONS', tabId: msg.tabId, questions }).catch(() => {});
         })
@@ -96,6 +111,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     case 'PC_CMD_SUMMARIZE':
       pc.setBusy(true, msg.tabId);
       pc.summarize(
+        msg.tabId,
         token => chrome.runtime.sendMessage({ type: 'PC_TOKEN', tabId: msg.tabId, token }).catch(() => {}),
         progress => chrome.runtime.sendMessage({ type: 'PC_SUMMARIZE_PROGRESS', tabId: msg.tabId, progress }).catch(() => {}),
       )
@@ -141,8 +157,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         .then(result => {
           chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, ...result }).catch(() => {});
         })
-        .catch(e => {
-          // Embed failed — return original text unfiltered so agent can still run
+        .catch(() => {
           chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, text: msg.domText }).catch(() => {});
         });
       break;
@@ -171,6 +186,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       pc.setBusy(true, msg.tabId);
       pc.chat(
         msg.messages,
+        msg.tabId,
         token => chrome.runtime.sendMessage({ type: 'PC_TOKEN', tabId: msg.tabId, token }).catch(() => {}),
         msg.opts,
       )

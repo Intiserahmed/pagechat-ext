@@ -3,7 +3,8 @@
 let _hostTabId          = null;
 let _pendingReturnTabId = null;   // tab to restore focus to after model loads
 let _ensurePromise      = null;   // deduplicates concurrent ensureModelHost calls
-let _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0, modelBusy: false, busyTabId: null };
+let _cachedState = { status: 'idle', progress: 0, useEmbed: false, modelBusy: false, busyTabId: null };
+const _cachedTabStates = new Map(); // tabId → { status, progress } — for bootstrap when FAB opens
 let _reconnecting       = false;  // true when recreating after tab was closed — skip focus steal
 
 // CDP state (agent loop)
@@ -77,13 +78,16 @@ async function _doEnsureModelHost() {
 chrome.tabs.onRemoved.addListener(tabId => {
   if (tabId === _hostTabId) {
     _hostTabId   = null;
-    _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
+    _cachedState = { status: 'idle', progress: 0, useEmbed: false, modelBusy: false, busyTabId: null };
+    _cachedTabStates.clear(); // all per-tab indexes gone with the model host
     chrome.storage.session.remove('hostTabId');
-    // Notify sidepanel so it can show reconnecting state
     notifySidepanel({ type: 'PC_STATE', ..._cachedState });
-    // Auto-recreate immediately so model stays warm, but don't steal focus
     _reconnecting = true;
     ensureModelHost().catch(console.error);
+  } else {
+    // Regular tab closed — free its page index in model-host
+    _cachedTabStates.delete(tabId);
+    chrome.runtime.sendMessage({ type: 'PC_CMD_REMOVE_INDEX', tabId }).catch(() => {});
   }
   if (tabId === _cdpTabId) {
     _cdpTabId  = null;
@@ -116,35 +120,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 
-  // Cache state broadcasts from the host tab
+  // Cache model state broadcasts from the host tab
   if (msg.type === 'PC_STATE') {
     _cachedState = {
-      status:      msg.status,
-      progress:    msg.progress,
-      useEmbed:    msg.useEmbed,
-      chunkCount:  msg.chunkCount,
-      cachedPages: msg.cachedPages,
-      modelBusy:   msg.modelBusy  ?? false,
-      busyTabId:   msg.busyTabId  ?? null,
+      status:    msg.status,
+      progress:  msg.progress,
+      useEmbed:  msg.useEmbed,
+      modelBusy: msg.modelBusy ?? false,
+      busyTabId: msg.busyTabId ?? null,
     };
     // Model finished loading — return focus to the user's original tab
-    if (msg.status === 'ready-no-index' && _pendingReturnTabId !== null) {
+    if (msg.status === 'ready' && _pendingReturnTabId !== null) {
       chrome.tabs.update(_pendingReturnTabId, { active: true }).catch(() => {});
       _pendingReturnTabId = null;
     }
     return;
   }
 
-  // Sidepanel asking for current state on open
+  // Cache and forward per-tab index state
+  if (msg.type === 'PC_TAB_STATE') {
+    _cachedTabStates.set(msg.tabId, { status: msg.status, progress: msg.progress });
+    return;
+  }
+
+  // Sidepanel asking for current state on open — include this tab's cached index state
   if (msg.type === 'PC_CMD_STATE') {
-    sendResponse(_cachedState);
+    const tabState = msg.tabId ? (_cachedTabStates.get(msg.tabId) ?? null) : null;
+    sendResponse({ ..._cachedState, tabState });
     return true;
   }
 
   // Ensure host tab alive for commands that actually need the model.
-  // PC_CMD_STATE_REQ and PC_CMD_RESTORE don't need a live model tab.
   const NEEDS_HOST = new Set([
-    'PC_CMD_LOAD', 'PC_CMD_INDEX', 'PC_CMD_CHAT', 'PC_CMD_SUMMARIZE',
+    'PC_CMD_LOAD', 'PC_CMD_INDEX', 'PC_CMD_HAS_INDEX', 'PC_CMD_CHAT', 'PC_CMD_SUMMARIZE',
     'PC_CMD_SUGGEST', 'PC_CMD_FILL', 'PC_CMD_EMBED_FILTER',
     'PC_CMD_AGENT_STEP', 'PC_CMD_REMAINING_GOAL', 'PC_CMD_INDEX_KNOWLEDGE',
   ]);

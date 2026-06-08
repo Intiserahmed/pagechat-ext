@@ -28,8 +28,9 @@ const _urlTabId = parseInt(new URLSearchParams(location.search).get('tabId')) ||
 // Responses stream back as PC_STATE / PC_TOKEN / PC_CHAT_DONE / PC_ERROR /
 // PC_SUGGESTIONS broadcasts from the offscreen document.
 const __pc = (() => {
-  let _state   = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
-  const _subs  = new Set();
+  let _state   = { status: 'idle', progress: 0, useEmbed: false, modelBusy: false, busyTabId: null };
+  const _subs     = new Set();
+  const _tabSubs  = new Set(); // subscribers for per-tab index status (PC_TAB_STATE)
   let _chatCbs           = null;  // { onToken, resolve, reject }
   let _suggestResolve    = null;
   let _fillResolve       = null;
@@ -129,6 +130,12 @@ const __pc = (() => {
           _embedFilterCbs = null;
         }
         break;
+
+      case 'PC_TAB_STATE':
+        if (msg.tabId === _myTabId) {
+          _tabSubs.forEach(fn => fn({ status: msg.status, progress: msg.progress }));
+        }
+        break;
     }
   });
 
@@ -142,10 +149,26 @@ const __pc = (() => {
     get tabId()      { return _myTabId; },
     setTabId(id)     { _myTabId = id; },
 
-    /** Subscribe to state changes. Returns unsubscribe function. */
+    /** Subscribe to model state changes. Returns unsubscribe fn. */
     subscribe(fn) {
       _subs.add(fn);
       return () => _subs.delete(fn);
+    },
+
+    /** Subscribe to this tab's indexing state (PC_TAB_STATE). Returns unsubscribe fn. */
+    subscribeTab(fn) {
+      _tabSubs.add(fn);
+      return () => _tabSubs.delete(fn);
+    },
+
+    /** Check if this tab already has a page index in model-host. */
+    hasIndex(tabId) {
+      return new Promise(resolve => {
+        chrome.runtime.sendMessage({ type: 'PC_CMD_HAS_INDEX', tabId }, resp => {
+          void chrome.runtime.lastError;
+          resolve(resp?.has ?? false);
+        });
+      });
     },
 
     // ── Commands (fire-and-forget or response via broadcast) ─────────────────
@@ -157,20 +180,9 @@ const __pc = (() => {
       chrome.runtime.sendMessage({ type: 'PC_CMD_SET_EMBED', val }).catch(() => {});
     },
 
-    /** Trigger indexing — progress arrives via PC_STATE broadcasts. */
+    /** Trigger indexing for this tab — progress arrives via PC_TAB_STATE broadcasts. */
     indexPage(text, url) {
-      chrome.runtime.sendMessage({ type: 'PC_CMD_INDEX', text, url }).catch(() => {});
-      return Promise.resolve();
-    },
-
-    /** Returns true if index was restored from cache, false on cache miss. */
-    restoreFromCache(url) {
-      return new Promise(resolve => {
-        chrome.runtime.sendMessage({ type: 'PC_CMD_RESTORE', url }, resp => {
-          void chrome.runtime.lastError;
-          resolve(resp?.hit ?? false);
-        });
-      });
+      chrome.runtime.sendMessage({ type: 'PC_CMD_INDEX', text, url, tabId: _myTabId }).catch(() => {});
     },
 
     /** Returns Promise<string[]> of 3 suggested questions. */
@@ -195,7 +207,7 @@ const __pc = (() => {
           resolve: () => { _modelBusy = false; resolve(); _chatCbs = null; },
           reject:  (e) => { _modelBusy = false; reject(e); _chatCbs = null; },
         };
-        chrome.runtime.sendMessage({ type: 'PC_CMD_CHAT', messages, tabId: _myTabId, opts }).catch(err => {
+        chrome.runtime.sendMessage({ type: 'PC_CMD_CHAT', messages, tabId: _myTabId, opts: opts }).catch(err => {
           _modelBusy = false; _chatCbs = null; reject(err);
         });
       });
@@ -527,11 +539,10 @@ function App() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [suggestions, setSuggestions]         = useState([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState('idle'); // idle | indexing | ready
-  const [pageReady, setPageReady]             = useState(true);  // false while switching/indexing new page
   const bottomRef     = useRef(null);
   const settingsRef   = useRef(settings);
   const currentUrlRef = useRef('');
-  const loadTabRef    = useRef(null);   // lets status effect re-trigger loadTab
+  const loadTabRef    = useRef(null);   // lets status effect re-trigger loadTab when model first ready
   const prevStatusRef  = useRef('idle'); // tracks previous status for transition detection
   const wasReadyRef    = useRef(false);  // true once model has been ready — used for reconnecting label
   const agentAbortRef  = useRef(false);  // set true to abort current agent run
@@ -541,9 +552,9 @@ function App() {
   const { status, progress, useEmbed, modelBusy, busyTabId } = state;
   // Another tab is currently generating — block sending from this tab
   const otherTabBusy = modelBusy && busyTabId !== null && busyTabId !== (tabIdRef.current || _urlTabId);
-  const isReady      = status === 'ready' && pageReady;
-  const modelLoaded  = status === 'ready' || status === 'ready-no-index'; // model loaded, page may not be indexed
-  const isLoading    = ['loading-embed', 'loading-chat', 'indexing'].includes(status);
+  const isReady      = status === 'ready' && tabStatus.status === 'ready';
+  const modelLoaded  = status === 'ready'; // model loaded (indexing is now per-tab, not global)
+  const isLoading    = ['loading-embed', 'loading-chat'].includes(status);
   const reconnecting = wasReadyRef.current && (status === 'idle' || isLoading);
 
   // Track when model has ever been ready so we can show "Reconnecting" on reload
@@ -565,12 +576,14 @@ function App() {
 
   // Bootstrap: get state from background cache, subscribe to future state changes
   useEffect(() => {
-    chrome.runtime.sendMessage({ type: 'PC_CMD_STATE' }, cached => {
+    const tabId = _urlTabId ?? __pc.tabId;
+    chrome.runtime.sendMessage({ type: 'PC_CMD_STATE', tabId }, cached => {
       void chrome.runtime.lastError;
       if (cached) {
         setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed, modelBusy: cached.modelBusy ?? false, busyTabId: cached.busyTabId ?? null });
+        // Restore this tab's cached index status if available
+        if (cached.tabState) setTabStatus(cached.tabState);
         if (cached.status === 'idle') {
-          // Apply persisted embed preference before starting the load
           chrome.storage.sync.get({ useEmbed: false }, ({ useEmbed }) => {
             if (useEmbed) __pc.setUseEmbed(true);
             __pc.loadModels();
@@ -583,7 +596,9 @@ function App() {
         });
       }
     });
-    return __pc.subscribe(s => setState({ status: s.status, progress: s.progress, useEmbed: s.useEmbed, modelBusy: s.modelBusy ?? false, busyTabId: s.busyTabId ?? null }));
+    const unsubModel = __pc.subscribe(s => setState({ status: s.status, progress: s.progress, useEmbed: s.useEmbed, modelBusy: s.modelBusy ?? false, busyTabId: s.busyTabId ?? null }));
+    const unsubTab   = __pc.subscribeTab(s => setTabStatus(s));
+    return () => { unsubModel(); unsubTab(); };
   }, []);
 
   // Tab change listener — update page pill, restore history, re-index / restore cache
@@ -617,20 +632,18 @@ function App() {
       const s = __pc.status;
       if (s === 'idle' || s === 'loading-embed' || s === 'loading-chat') return;
 
-      // Block chat until this page's index is confirmed — prevents stale answers from previous page
-      if (prevUrl && url !== prevUrl) setPageReady(false);
-
       const run = async () => {
         setSuggestions([]);
-        if (isYouTubeVideo(url)) { setPageReady(true); return; }
-        const hit = await __pc.restoreFromCache(url);
-        if (!hit) {
-          handleIndex(); // pageReady will be set true when status → 'ready'
-        } else {
-          setPageReady(true); // cache hit — index is live, safe to chat
+        if (isYouTubeVideo(url)) return;
+        const hasIdx = await __pc.hasIndex(tabId);
+        if (hasIdx) {
+          setTabStatus({ status: 'ready', progress: 100 });
           if (settingsRef.current.showSuggestions) {
-            __pc.suggestQuestions().then(qs => setSuggestions(qs)).catch(() => {});
+            __pc.suggestQuestions(tabId).then(qs => setSuggestions(qs)).catch(() => {});
           }
+        } else {
+          setTabStatus({ status: 'idle', progress: 0 });
+          handleIndex(); // PC_TAB_STATE events will drive setTabStatus automatically
         }
       };
 
@@ -723,53 +736,39 @@ function App() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [msgs]);
 
-  // Re-trigger loadTab when model transitions from loading → ready.
-  // loadTab exits early while the model loads, so the page never indexes after first open.
+  // Re-trigger loadTab when model transitions from loading → ready so page gets indexed.
   useEffect(() => {
     const prev = prevStatusRef.current;
     prevStatusRef.current = status;
     const wasLoading = prev === 'idle' || prev === 'loading-embed' || prev === 'loading-chat';
-    const isNowReady = status === 'ready' || status === 'ready-no-index';
-    // Page index just became live (after indexing or model load) — allow chat
-    if (status === 'ready') setPageReady(true);
-    if (wasLoading && isNowReady) {
-      if (loadTabRef.current) {
+    if (wasLoading && status === 'ready') {
+      // Re-trigger loadTab with the correct tab for this FAB
+      const tabId = tabIdRef.current || _urlTabId;
+      if (tabId) {
+        chrome.tabs.get(tabId, tab => { void chrome.runtime.lastError; if (tab && loadTabRef.current) loadTabRef.current(tab, true); });
+      } else {
         chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-          if (tab) loadTabRef.current(tab);
+          if (tab && loadTabRef.current) loadTabRef.current(tab, true);
         });
       }
-      // Re-feed knowledge base after reconnect (model tab was closed and recreated)
+      // Re-feed knowledge base after reconnect
       if (wasReadyRef.current && settingsRef.current.fillKnowledge?.trim()) {
         __pc.indexKnowledge(settingsRef.current.fillKnowledge).catch(() => {});
       }
     }
+    if (status === 'ready') wasReadyRef.current = true;
   }, [status]);
 
-  // Generate suggestions once page is freshly indexed
+  // Generate suggestions when this tab's index becomes ready for the first time
   useEffect(() => {
     if (!settings.showSuggestions) { setSuggestions([]); return; }
-    if (status === 'ready' && msgs.length === 0) {
-      setSuggestions([]);
-      __pc.suggestQuestions()
-        .then(qs => setSuggestions(qs))
-        .catch(() => {});
+    if (tabStatus.status === 'ready' && msgs.length === 0) {
+      const tabId = tabIdRef.current || _urlTabId;
+      if (tabId) {
+        __pc.suggestQuestions(tabId).then(qs => setSuggestions(qs)).catch(() => {});
+      }
     }
-  }, [status, settings.showSuggestions]);
-
-  // Knowledge indexing only needed when embed model is active (for semantic fill matching)
-  // With embed disabled, fillForm uses BM25 on raw text directly — no pre-indexing needed.
-
-  // Auto-index: BM25 mode + autoIndex setting + real web page
-  useEffect(() => {
-    if (status === 'ready-no-index' && !useEmbed && settings.autoIndex) {
-      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-        const url = tab?.url || '';
-        if (url.startsWith('http://') || url.startsWith('https://')) {
-          handleIndex();
-        }
-      });
-    }
-  }, [status, useEmbed, settings.autoIndex]);
+  }, [tabStatus.status, settings.showSuggestions]);
 
   const isYouTubeVideo = (url) => /youtube\.com\/watch/.test(url);
 
@@ -953,26 +952,27 @@ function App() {
   const handleLoad = () => __pc.loadModels();
 
   const handleIndex = () => {
+    const tabId = tabIdRef.current || _urlTabId;
+    const sendMsg = (content) => setMsgs(m => m.length === 0 ? [{ role: 'assistant', content }] : m);
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       if (!tab?.id) return;
       const url = tab.url || '';
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
-        setMsgs([{ role: 'assistant', content: "Arkhon can't access this page. Navigate to a regular website and try again." }]);
+        sendMsg("Arkhon can't access this page. Navigate to a regular website and try again.");
         return;
       }
       chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTENT' }, (resp) => {
         void chrome.runtime.lastError;
         if (!resp) {
-          setMsgs([{ role: 'assistant', content: "Couldn't read this page. Try refreshing the tab, then re-index." }]);
+          sendMsg("Couldn't read this page. Try refreshing the tab, then re-index.");
           return;
         }
         if (!resp.text || resp.text.trim().length < 200) {
-          setMsgs([{ role: 'assistant', content: "Very little text found on this page — it may be a PDF, a JS-rendered app, or a login wall. Try scrolling to load content, then re-index." }]);
+          sendMsg("Very little text found on this page — it may be a PDF, a JS-rendered app, or a login wall. Try scrolling to load content, then re-index.");
           return;
         }
         setPageInfo({ title: resp.title, url: resp.url });
-        setMsgs([]);
-        __pc.indexPage(resp.text, resp.url);
+        __pc.indexPage(resp.text, resp.url); // PC_TAB_STATE events drive tabStatus
       });
     });
   };
@@ -1076,8 +1076,8 @@ function App() {
       updateLast({ thinking: 'Indexing transcript…' });
       await new Promise(res => {
         __pc.indexPage(result.text, tab.url);
-        // Wait for indexing to complete
-        const unsub = __pc.subscribe(s => { if (s.status === 'ready') { unsub(); res(); } });
+        // Wait for this tab's indexing to complete via per-tab state
+        const unsub = __pc.subscribeTab(s => { if (s.status === 'ready') { unsub(); res(); } });
       });
       updateLast({ thinking: 'Summarizing…' });
       await __pc.summarize(
@@ -1239,7 +1239,7 @@ function App() {
       h('button', { className: 'btn-primary', onClick: handleLoad }, 'Retry ', Ic.index()),
     ),
 
-    !showSettings && (isLoading || status === 'idle') && status !== 'indexing' && h('div', { className: 'setup' },
+    !showSettings && (isLoading || status === 'idle') && h('div', { className: 'setup' },
       h('p', { className: 'setup-msg' }, statusLabel(status, progress, reconnecting)),
       h(ProgressBar, { progress, pulse: status === 'idle' }),
       h('p', { className: 'setup-sub' }, reconnecting
@@ -1247,21 +1247,15 @@ function App() {
         : 'Cached after this — instant on next open.'),
     ),
 
-    !showSettings && status === 'ready-no-index' && useEmbed && h('div', { className: 'setup' },
+    !showSettings && status === 'ready' && useEmbed && tabStatus.status === 'idle' && h('div', { className: 'setup' },
       h('div', { className: 'setup-icon' }, '◎'),
       h('p', { className: 'setup-msg' }, 'Models loaded. Index the current page to start chatting.'),
       h('button', { className: 'btn-primary', onClick: handleIndex }, Ic.index(), ' Index this page'),
     ),
 
-    !showSettings && status === 'indexing' && h('div', { className: 'setup' },
-      h('p', { className: 'setup-msg' }, 'Embedding page chunks…'),
-      h(ProgressBar, { progress, pulse: false }),
-      h('p', { className: 'setup-sub' }, __pc.chunkCount + ' chunks indexed so far'),
-    ),
-
-    !showSettings && status === 'ready' && !pageReady && h('div', { className: 'setup' },
-      h('p', { className: 'setup-msg' }, 'Switching page…'),
-      h(ProgressBar, { progress: 0, pulse: true }),
+    !showSettings && status === 'ready' && tabStatus.status === 'indexing' && h('div', { className: 'setup' },
+      h('p', { className: 'setup-msg' }, 'Indexing page…'),
+      h(ProgressBar, { progress: tabStatus.progress, pulse: false }),
     ),
 
     !showSettings && (isReady || (modelLoaded && msgs.length > 0)) && h(React.Fragment, null,
