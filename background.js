@@ -277,6 +277,11 @@ async function cdpExecuteAction(tabId, action, index, value, direction) {
 
 // ── CDP message handlers ───────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'GET_MY_TAB_ID') {
+    sendResponse(sender.tab?.id ?? null);
+    return true;
+  }
+
   if (msg.type === 'OPEN_SIDE_PANEL') {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       if (!tab) return;

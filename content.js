@@ -323,11 +323,21 @@ async function tryInnerTube(videoId, client) {
 // ── FAB overlay injection ──────────────────────────────────────────────────
 function injectFAB() {
   if (document.getElementById('arkhon-host')) return;
+  // Get own tab ID from background (content scripts can't call chrome.tabs.getCurrent)
+  // so the FAB iframe always knows which tab it belongs to, even when opened in background
+  chrome.runtime.sendMessage({ type: 'GET_MY_TAB_ID' }, (tabId) => {
+    void chrome.runtime.lastError;
+    _createFAB(tabId);
+  });
+}
+
+function _createFAB(tabId) {
+  if (document.getElementById('arkhon-host')) return;
 
   const host = document.createElement('div');
   host.id = 'arkhon-host';
   const shadow = host.attachShadow({ mode: 'open' });
-  const frameUrl = chrome.runtime.getURL('sidepanel/index.html');
+  const frameUrl = chrome.runtime.getURL('sidepanel/index.html') + (tabId ? '?tabId=' + tabId : '');
 
   shadow.innerHTML = `
     <style>
@@ -460,3 +470,4 @@ function injectFAB() {
 }
 
 injectFAB();
+

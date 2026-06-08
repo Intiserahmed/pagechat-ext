@@ -26,7 +26,6 @@ window.addEventListener('unhandledrejection', (e) => {
 // PC_SUGGESTIONS broadcasts from the offscreen document.
 const __pc = (() => {
   let _state   = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
-  let _myTabId = null;
   const _subs  = new Set();
   let _chatCbs           = null;  // { onToken, resolve, reject }
   let _suggestResolve    = null;
@@ -39,10 +38,16 @@ const __pc = (() => {
   let _stopped                = false;
   let _modelBusy              = false;
 
-  // Cache this iframe's tab ID so we can filter tab-targeted messages.
-  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-    _myTabId = tab?.id ?? null;
-  });
+  // FAB iframes get their tab ID embedded in the URL (?tabId=X) by content.js.
+  // This is reliable even when the tab is in the background at injection time.
+  // Sidebar (IS_SIDEBAR=true) has no URL param — falls back to active-tab query.
+  const _urlTabId = parseInt(new URLSearchParams(location.search).get('tabId')) || null;
+  let _myTabId = _urlTabId;
+  if (!_urlTabId) {
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+      _myTabId = tab?.id ?? null;
+    });
+  }
 
   // Central incoming-message router (offscreen → all extension pages)
   chrome.runtime.onMessage.addListener((msg) => {
@@ -632,8 +637,14 @@ function App() {
     // Expose loadTab so the status-watching effect can re-trigger it when model becomes ready
     loadTabRef.current = loadTab;
 
-    // Initial load — run immediately
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab, true));
+    // Initial load — use the tab ID from URL param if available (FAB knows its own tab),
+    // otherwise query the active tab (sidebar mode)
+    const initTabId = _urlTabId ?? __pc.tabId;
+    if (initTabId) {
+      chrome.tabs.get(initTabId, tab => { void chrome.runtime.lastError; if (tab) loadTab(tab, true); });
+    } else {
+      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab, true));
+    }
 
     // ── Direct tab event listeners ────────────────────────────────────────────
     // Each FAB listens to its OWN tab only — fixes the "port stolen by newest FAB"
