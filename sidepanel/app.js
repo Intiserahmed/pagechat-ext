@@ -133,6 +133,7 @@ const __pc = (() => {
     get chunkCount() { return _state.chunkCount; },
     get cachedPages(){ return _state.cachedPages; },
     get tabId()      { return _myTabId; },
+    setTabId(id)     { _myTabId = id; },
 
     /** Subscribe to state changes. Returns unsubscribe function. */
     subscribe(fn) {
@@ -639,7 +640,14 @@ function App() {
     // problem where only the most recently opened FAB received tab-change events.
 
     const onTabActivated = ({ tabId: activeTabId }) => {
-      if (activeTabId !== tabIdRef.current) return; // not our tab, ignore
+      if (IS_SIDEBAR) {
+        // Sidebar follows whichever tab becomes active
+        tabIdRef.current = activeTabId;
+        __pc.setTabId(activeTabId);
+      } else {
+        // FAB is locked to its own tab
+        if (activeTabId !== tabIdRef.current) return;
+      }
       chrome.tabs.get(activeTabId, tab => {
         void chrome.runtime.lastError;
         if (tab) loadTab(tab);
