@@ -32,11 +32,12 @@ const __pc = (() => {
   let _suggestResolve    = null;
   let _fillResolve       = null;
   let _knowledgeResolve  = null;
-  let _agentResolve           = null;
-  let _embedFilterResolve     = null;
+  let _agentCbs               = null;  // { resolve, reject }
+  let _embedFilterCbs         = null;  // { resolve, reject }
   let _embedStatusCb          = null;
-  let _remainingGoalResolve   = null;
+  let _remainingGoalCbs       = null;  // { resolve, reject }
   let _stopped                = false;
+  let _modelBusy              = false;
 
   // Cache this iframe's tab ID so we can filter tab-targeted messages.
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
@@ -97,16 +98,16 @@ const __pc = (() => {
         break;
 
       case 'PC_AGENT_RESULT':
-        if (msg.tabId === _myTabId && _agentResolve) {
-          _agentResolve(msg.action);
-          _agentResolve = null;
+        if (msg.tabId === _myTabId && _agentCbs) {
+          _agentCbs.resolve(msg.action);
+          _agentCbs = null;
         }
         break;
 
       case 'PC_REMAINING_GOAL_RESULT':
-        if (msg.tabId === _myTabId && _remainingGoalResolve) {
-          _remainingGoalResolve(msg.remaining);
-          _remainingGoalResolve = null;
+        if (msg.tabId === _myTabId && _remainingGoalCbs) {
+          _remainingGoalCbs.resolve(msg.remaining);
+          _remainingGoalCbs = null;
         }
         break;
 
@@ -115,9 +116,9 @@ const __pc = (() => {
         break;
 
       case 'PC_EMBED_FILTER_RESULT':
-        if (msg.tabId === _myTabId && _embedFilterResolve) {
-          _embedFilterResolve({ text: msg.text, indexMap: msg.indexMap });
-          _embedFilterResolve = null;
+        if (msg.tabId === _myTabId && _embedFilterCbs) {
+          _embedFilterCbs.resolve({ text: msg.text, indexMap: msg.indexMap });
+          _embedFilterCbs = null;
         }
         break;
     }
@@ -175,12 +176,17 @@ const __pc = (() => {
 
     /** Stream a chat response. onToken called per token; resolves on done. */
     chat(messages, onToken, opts = {}) {
+      if (_modelBusy) return Promise.reject(new Error('Model is busy — please wait'));
+      _modelBusy = true;
       return new Promise((resolve, reject) => {
         _stopped = false;
-        _chatCbs = { onToken, resolve, reject };
+        _chatCbs = {
+          onToken,
+          resolve: () => { _modelBusy = false; resolve(); _chatCbs = null; },
+          reject:  (e) => { _modelBusy = false; reject(e); _chatCbs = null; },
+        };
         chrome.runtime.sendMessage({ type: 'PC_CMD_CHAT', messages, tabId: _myTabId, opts }).catch(err => {
-          _chatCbs = null;
-          reject(err);
+          _modelBusy = false; _chatCbs = null; reject(err);
         });
       });
     },
@@ -231,14 +237,16 @@ const __pc = (() => {
         };
         chrome.runtime.onMessage.addListener(progressHandler);
 
+        _modelBusy = true;
         _chatCbs = {
           onToken,
-          resolve: () => { chrome.runtime.onMessage.removeListener(progressHandler); _chatCbs = null; resolve(); },
-          reject:  (e) => { chrome.runtime.onMessage.removeListener(progressHandler); _chatCbs = null; reject(e); },
+          resolve: () => { _modelBusy = false; chrome.runtime.onMessage.removeListener(progressHandler); _chatCbs = null; resolve(); },
+          reject:  (e) => { _modelBusy = false; chrome.runtime.onMessage.removeListener(progressHandler); _chatCbs = null; reject(e); },
         };
 
         chrome.runtime.sendMessage({ type: 'PC_CMD_SUMMARIZE', tabId: _myTabId })
           .catch(err => {
+            _modelBusy = false;
             chrome.runtime.onMessage.removeListener(progressHandler);
             _chatCbs = null;
             reject(err);
@@ -249,37 +257,47 @@ const __pc = (() => {
     /** After an action, ask model what goal remains. Returns remaining goal string or "done". */
     remainingGoal(goal, actionTaken) {
       return new Promise((resolve, reject) => {
-        _remainingGoalResolve = resolve;
+        _remainingGoalCbs = { resolve, reject };
         chrome.runtime.sendMessage({ type: 'PC_CMD_REMAINING_GOAL', goal, actionTaken, tabId: _myTabId })
-          .catch(err => { _remainingGoalResolve = null; reject(err); });
+          .catch(err => { _remainingGoalCbs = null; reject(err); });
       });
     },
 
-    /** Filter DOM elements by nomic-embed cosine similarity. Returns { text }. */
+    /** Filter DOM elements by nomic-embed cosine similarity. Returns { text, indexMap }. */
     embedFilter(goal, domText, topK = 5, onStatus) {
       return new Promise((resolve, reject) => {
-        _embedFilterResolve = resolve;
+        _embedFilterCbs = { resolve, reject };
         _embedStatusCb = onStatus ?? null;
         chrome.runtime.sendMessage({ type: 'PC_CMD_EMBED_FILTER', goal, domText, topK, tabId: _myTabId })
-          .catch(err => { _embedFilterResolve = null; _embedStatusCb = null; reject(err); });
+          .catch(err => { _embedFilterCbs = null; _embedStatusCb = null; reject(err); });
       });
     },
 
     /** Single agent reasoning step. Returns Promise<string> action line. */
     agentStep(goal, domTree, history) {
       return new Promise((resolve, reject) => {
-        _agentResolve = resolve;
+        _agentCbs = { resolve, reject };
         chrome.runtime.sendMessage({ type: 'PC_CMD_AGENT_STEP', goal, domTree, history, tabId: _myTabId })
-          .catch(err => { _agentResolve = null; reject(err); });
+          .catch(err => { _agentCbs = null; reject(err); });
       });
     },
 
-    /** Stop the current streaming response immediately. */
+    /** Stop streaming chat immediately. */
     stop() {
       if (!_chatCbs) return;
       _stopped = true;
       _chatCbs.resolve();
-      _chatCbs = null;
+      // resolve() already clears _chatCbs and _modelBusy via the wrapper above
+    },
+
+    /** Abort all pending AI operations (chat, agent step, embed filter). */
+    abort() {
+      _stopped = true;
+      _modelBusy = false;
+      if (_chatCbs) { _chatCbs.reject(new Error('Aborted')); _chatCbs = null; }
+      if (_agentCbs) { _agentCbs.reject(new Error('Aborted')); _agentCbs = null; }
+      if (_embedFilterCbs) { _embedFilterCbs.reject(new Error('Aborted')); _embedFilterCbs = null; }
+      if (_remainingGoalCbs) { _remainingGoalCbs.reject(new Error('Aborted')); _remainingGoalCbs = null; }
     },
   };
 })();
@@ -302,6 +320,12 @@ const Ic = {
     h('line', { x1: 3, y1: 6, x2: 21, y2: 6 }),
     h('line', { x1: 3, y1: 12, x2: 15, y2: 12 }),
     h('line', { x1: 3, y1: 18, x2: 18, y2: 18 }),
+  ),
+  trash: () => h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+    h('polyline', { points: '3 6 5 6 21 6' }),
+    h('path', { d: 'M19 6l-1 14H6L5 6' }),
+    h('path', { d: 'M10 11v6M14 11v6' }),
+    h('path', { d: 'M9 6V4h6v2' }),
   ),
   dot: (live) => h('span', {
     className: 'led' + (live ? ' pulse' : ''),
@@ -499,6 +523,7 @@ function App() {
   const loadTabRef    = useRef(null);   // lets status effect re-trigger loadTab
   const prevStatusRef  = useRef('idle'); // tracks previous status for transition detection
   const wasReadyRef    = useRef(false);  // true once model has been ready — used for reconnecting label
+  const agentAbortRef  = useRef(false);  // set true to abort current agent run
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const { status, progress, useEmbed } = state;
@@ -636,10 +661,16 @@ function App() {
     prevStatusRef.current = status;
     const wasLoading = prev === 'idle' || prev === 'loading-embed' || prev === 'loading-chat';
     const isNowReady = status === 'ready' || status === 'ready-no-index';
-    if (wasLoading && isNowReady && loadTabRef.current) {
-      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-        if (tab) loadTabRef.current(tab);
-      });
+    if (wasLoading && isNowReady) {
+      if (loadTabRef.current) {
+        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+          if (tab) loadTabRef.current(tab);
+        });
+      }
+      // Re-feed knowledge base after reconnect (model tab was closed and recreated)
+      if (wasReadyRef.current && settingsRef.current.fillKnowledge?.trim()) {
+        __pc.indexKnowledge(settingsRef.current.fillKnowledge).catch(() => {});
+      }
     }
   }, [status]);
 
@@ -690,10 +721,10 @@ function App() {
 
   const runAgent = async (initialGoal) => {
     if (agentBusy || !initialGoal.trim()) return;
+    agentAbortRef.current = false;
     setAgentBusy(true);
     setInput('');
     setAgentMsgs([{ role: 'user', content: initialGoal }]);
-
 
     const MAX_STEPS = 12;
     const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
@@ -701,6 +732,19 @@ function App() {
     const getTabUrl = () => new Promise(r => chrome.tabs.get(tab.id, t => r(t?.url ?? '')));
     const reattach  = () => new Promise(resolve => {
       chrome.runtime.sendMessage({ type: 'AGENT_START', tabId: tab.id }, r => { void chrome.runtime.lastError; resolve(r); });
+    });
+
+    // Wait for the tab to finish loading (used after navigation/click that changes URL)
+    const waitForPageLoad = (timeout = 10000) => new Promise(resolve => {
+      const timer = setTimeout(resolve, timeout);
+      const handler = (updatedTabId, changeInfo) => {
+        if (updatedTabId === tab.id && changeInfo.status === 'complete') {
+          clearTimeout(timer);
+          chrome.tabs.onUpdated.removeListener(handler);
+          resolve();
+        }
+      };
+      chrome.tabs.onUpdated.addListener(handler);
     });
 
     // Attach CDP debugger for the agent session
@@ -720,6 +764,8 @@ function App() {
       const actionHistory = []; // accumulates completed actions — passed to LLM each step
 
       for (let step = 0; step < MAX_STEPS; step++) {
+        if (agentAbortRef.current) break;
+
         // Get semantic element list via CDP Accessibility tree
         const domResult = await new Promise((resolve, reject) => {
           chrome.runtime.sendMessage({ type: 'GET_DOM_TREE_CDP', tabId: tab.id }, resp => {
@@ -771,7 +817,7 @@ function App() {
 
         if (action === 'navigate') {
           chrome.tabs.update(tab.id, { url: parsed.url });
-          await sleep(1500);
+          await waitForPageLoad();
           await reattach();
         } else {
           const urlBefore = await getTabUrl();
@@ -783,15 +829,18 @@ function App() {
             }, resp => { void chrome.runtime.lastError; resolve(resp ?? { ok: false, error: 'no response' }); });
           });
           if (result && !result.ok) updateStep(`→ ${actionSummary} [failed: ${result.error}]`);
-          await sleep(800);
 
-          // After a navigating click, re-attach CDP for the new page
+          // After a navigating click, wait for full page load then re-attach CDP
           if (action === 'click') {
             const urlAfter = await getTabUrl();
             if (urlAfter !== urlBefore) {
-              await sleep(500);
+              await waitForPageLoad();
               await reattach();
+            } else {
+              await sleep(600); // same-page interaction — small settle delay
             }
+          } else {
+            await sleep(400);
           }
         }
 
@@ -814,8 +863,11 @@ function App() {
         window.location.reload();
         return;
       }
-      setAgentMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
+      if (e.message !== 'Aborted') {
+        setAgentMsgs(m => [...m, { role: 'assistant', content: 'Agent error: ' + e.message }]);
+      }
     } finally {
+      agentAbortRef.current = false;
       chrome.runtime.sendMessage({ type: 'AGENT_STOP', tabId: tab.id }, () => void chrome.runtime.lastError);
       setAgentBusy(false);
     }
@@ -976,8 +1028,10 @@ function App() {
 
     setInput('');
 
-    const history = [...msgs, { role: 'user', content: text }];
-    setMsgs([...history, { role: 'assistant', content: '', thinking: '' }]);
+    const MAX_CTX = 20; // keep last 10 turns to stay within model context window
+    const rawHistory = [...msgs, { role: 'user', content: text }];
+    const history = rawHistory.length > MAX_CTX ? rawHistory.slice(-MAX_CTX) : rawHistory;
+    setMsgs([...rawHistory, { role: 'assistant', content: '', thinking: '' }]);
     setBusy(true);
 
     // Parse <think>…</think> out of the raw token stream
@@ -1071,6 +1125,11 @@ function App() {
             },
           }, 'Agent'),
         ),
+        msgs.length > 0 && !busy && !agentBusy && h('button', {
+          className: 'btn-ghost btn-sm',
+          onClick: () => { setMsgs([]); setAgentMsgs([]); setSuggestions([]); },
+          title: 'Clear chat',
+        }, Ic.trash()),
         h('button', {
           className: 'btn-ghost btn-sm' + (showSettings ? ' active' : ''),
           onClick: () => setShowSettings(s => !s),
@@ -1168,7 +1227,16 @@ function App() {
               style: { flexShrink: 0 },
             }, Ic.summarize()),
         busy || agentBusy
-          ? h('button', { className: 'btn-stop', onClick: () => { __pc.stop(); setAgentBusy(false); }, title: 'Stop' }, Ic.stop())
+          ? h('button', {
+              className: 'btn-stop',
+              title: 'Stop',
+              onClick: () => {
+                agentAbortRef.current = true;
+                __pc.abort();
+                setBusy(false);
+                setAgentBusy(false);
+              },
+            }, Ic.stop())
           : h('button', {
               className: 'btn-send',
               onClick: () => IS_SIDEBAR ? runAgent(input) : send(input),

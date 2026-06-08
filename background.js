@@ -4,6 +4,7 @@ let _hostTabId          = null;
 let _pendingReturnTabId = null;   // tab to restore focus to after model loads
 let _ensurePromise      = null;   // deduplicates concurrent ensureModelHost calls
 let _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
+let _reconnecting       = false;  // true when recreating after tab was closed — skip focus steal
 
 // CDP state (agent loop)
 let _cdpTabId   = null;
@@ -55,10 +56,13 @@ async function _doEnsureModelHost() {
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   _pendingReturnTabId = activeTab?.id ?? null;
 
-  // Open active so Chrome grants a real WebGPU context — we switch back once the model is ready
+  // Open active so Chrome grants a real WebGPU context — we switch back once the model is ready.
+  // On reconnect (tab was dismissed), open in background to avoid stealing focus.
+  const needsFocus = !_reconnecting;
+  _reconnecting = false;
   const tab = await chrome.tabs.create({
     url:    chrome.runtime.getURL('model-host.html'),
-    active: true,
+    active: needsFocus,
     pinned: true,
   });
   _hostTabId = tab.id;
@@ -73,7 +77,8 @@ chrome.tabs.onRemoved.addListener(tabId => {
     chrome.storage.session.remove('hostTabId');
     // Notify sidepanel so it can show reconnecting state
     notifySidepanel({ type: 'PC_STATE', ..._cachedState });
-    // Recreate in background immediately — don't wait for next command
+    // Auto-recreate immediately so model stays warm, but don't steal focus
+    _reconnecting = true;
     ensureModelHost().catch(console.error);
   }
   if (tabId === _cdpTabId) {
