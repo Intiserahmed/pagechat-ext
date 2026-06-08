@@ -132,6 +132,7 @@ const __pc = (() => {
     get useEmbed()   { return _state.useEmbed; },
     get chunkCount() { return _state.chunkCount; },
     get cachedPages(){ return _state.cachedPages; },
+    get tabId()      { return _myTabId; },
 
     /** Subscribe to state changes. Returns unsubscribe function. */
     subscribe(fn) {
@@ -518,6 +519,7 @@ function App() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [suggestions, setSuggestions]         = useState([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState('idle'); // idle | indexing | ready
+  const [pageReady, setPageReady]             = useState(true);  // false while switching/indexing new page
   const bottomRef     = useRef(null);
   const settingsRef   = useRef(settings);
   const currentUrlRef = useRef('');
@@ -525,10 +527,11 @@ function App() {
   const prevStatusRef  = useRef('idle'); // tracks previous status for transition detection
   const wasReadyRef    = useRef(false);  // true once model has been ready — used for reconnecting label
   const agentAbortRef  = useRef(false);  // set true to abort current agent run
+  const tabIdRef       = useRef(null);   // tab ID — set once loadTab runs, used for chat persistence
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const { status, progress, useEmbed } = state;
-  const isReady      = status === 'ready';
+  const isReady      = status === 'ready' && pageReady;
   const modelLoaded  = status === 'ready' || status === 'ready-no-index'; // model loaded, page may not be indexed
   const isLoading    = ['loading-embed', 'loading-chat', 'indexing'].includes(status);
   const reconnecting = wasReadyRef.current && (status === 'idle' || isLoading);
@@ -541,11 +544,13 @@ function App() {
     chrome.storage.sync.get(DEFAULT_SETTINGS, stored => setSettings(stored));
   }, []);
 
-  // Save chat history to session storage whenever msgs change
+  // Save chat history to session storage keyed by tab ID (persists across same-tab navigations)
   useEffect(() => {
-    const url = currentUrlRef.current;
-    if (!url || msgs.length === 0) return;
-    chrome.storage.session.set({ [`arkhon_msgs_${url}`]: msgs });
+    const tabId = tabIdRef.current || __pc.tabId;
+    if (!tabId || msgs.length === 0) return;
+    // Keep last 60 messages to prevent unbounded storage growth
+    const toSave = msgs.length > 60 ? msgs.slice(-60) : msgs;
+    chrome.storage.session.set({ [`arkhon_msgs_tab_${tabId}`]: toSave });
   }, [msgs]);
 
   // Bootstrap: get state from background cache, subscribe to future state changes
@@ -577,28 +582,45 @@ function App() {
 
     const loadTab = (tab, immediate = false) => {
       if (!tab) return;
-      const url   = tab.url || '';
-      const title = tab.title || '';
+      const url     = tab.url || '';
+      const title   = tab.title || '';
+      const prevUrl = currentUrlRef.current;
       setPageInfo({ title, url });
       currentUrlRef.current = url;
 
-      // Always restore chat history for this URL
-      chrome.storage.session.get(`arkhon_msgs_${url}`, stored => {
-        setMsgs(stored[`arkhon_msgs_${url}`] ?? []);
-      });
+      // Restore chat history keyed by tab ID — survives page navigations within the same tab
+      const tabId = tab.id ?? __pc.tabId;
+      if (tabId) tabIdRef.current = tabId; // cache early so save useEffect never misses
+      if (tabId) {
+        chrome.storage.session.get(`arkhon_msgs_tab_${tabId}`, stored => {
+          const history = stored[`arkhon_msgs_tab_${tabId}`] ?? [];
+          // Insert a page-change divider when navigating to a new URL mid-session
+          if (prevUrl && url !== prevUrl && history.length > 0 && url.startsWith('http')) {
+            setMsgs([...history, { role: 'nav', content: title || url }]);
+          } else {
+            setMsgs(history);
+          }
+        });
+      }
 
       if (!url.startsWith('http://') && !url.startsWith('https://')) return;
       const s = __pc.status;
       if (s === 'idle' || s === 'loading-embed' || s === 'loading-chat') return;
 
+      // Block chat until this page's index is confirmed — prevents stale answers from previous page
+      if (prevUrl && url !== prevUrl) setPageReady(false);
+
       const run = async () => {
         setSuggestions([]);
-        if (isYouTubeVideo(url)) return; // YouTube: wait for user to trigger
+        if (isYouTubeVideo(url)) { setPageReady(true); return; }
         const hit = await __pc.restoreFromCache(url);
         if (!hit) {
-          handleIndex();
-        } else if (settingsRef.current.showSuggestions) {
-          __pc.suggestQuestions().then(qs => setSuggestions(qs)).catch(() => {});
+          handleIndex(); // pageReady will be set true when status → 'ready'
+        } else {
+          setPageReady(true); // cache hit — index is live, safe to chat
+          if (settingsRef.current.showSuggestions) {
+            __pc.suggestQuestions().then(qs => setSuggestions(qs)).catch(() => {});
+          }
         }
       };
 
@@ -612,24 +634,42 @@ function App() {
     // Initial load — run immediately
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab, true));
 
-    // Persistent port — background pushes tab-change events reliably.
-    // Auto-reconnects when the service worker is killed and restarts.
+    // ── Direct tab event listeners ────────────────────────────────────────────
+    // Each FAB listens to its OWN tab only — fixes the "port stolen by newest FAB"
+    // problem where only the most recently opened FAB received tab-change events.
+
+    const onTabActivated = ({ tabId: activeTabId }) => {
+      if (activeTabId !== tabIdRef.current) return; // not our tab, ignore
+      chrome.tabs.get(activeTabId, tab => {
+        void chrome.runtime.lastError;
+        if (tab) loadTab(tab);
+      });
+    };
+
+    const onTabUpdated = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabIdRef.current) return; // not our tab, ignore
+      if (changeInfo.status === 'complete' && tab.url) loadTab(tab);
+    };
+
+    chrome.tabs.onActivated.addListener(onTabActivated);
+    chrome.tabs.onUpdated.addListener(onTabUpdated);
+
+    // Persistent port — used only for SW-restart state sync and YouTube SPA events.
     let port;
     const connectPort = () => {
       try {
         port = chrome.runtime.connect({ name: 'sidepanel' });
       } catch (e) {
-        // Extension context invalidated (SW reloaded) — reload the panel to restore context
         if (e.message?.includes('Extension context invalidated')) { window.location.reload(); return; }
         throw e;
       }
       port.onMessage.addListener((msg) => {
-        if (msg.type === 'TAB_UPDATED' && msg.url) {
-          chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-            loadTab({ ...tab, url: msg.url });
+        // YouTube SPA navigation fires YT_NAVIGATE → TAB_UPDATED via port (content script relay)
+        if (msg.type === 'TAB_UPDATED' && msg.url && tabIdRef.current) {
+          chrome.tabs.get(tabIdRef.current, tab => {
+            void chrome.runtime.lastError;
+            if (tab) loadTab({ ...tab, url: msg.url });
           });
-        } else if (msg.type === 'TAB_CHANGED') {
-          chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => loadTab(tab));
         }
       });
       port.onDisconnect.addListener(() => {
@@ -648,7 +688,12 @@ function App() {
     };
     connectPort();
 
-    return () => { port.disconnect(); clearTimeout(debounce); };
+    return () => {
+      chrome.tabs.onActivated.removeListener(onTabActivated);
+      chrome.tabs.onUpdated.removeListener(onTabUpdated);
+      port.disconnect();
+      clearTimeout(debounce);
+    };
   }, []);
 
   useEffect(() => {
@@ -662,6 +707,8 @@ function App() {
     prevStatusRef.current = status;
     const wasLoading = prev === 'idle' || prev === 'loading-embed' || prev === 'loading-chat';
     const isNowReady = status === 'ready' || status === 'ready-no-index';
+    // Page index just became live (after indexing or model load) — allow chat
+    if (status === 'ready') setPageReady(true);
     if (wasLoading && isNowReady) {
       if (loadTabRef.current) {
         chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
@@ -1189,6 +1236,11 @@ function App() {
       h('p', { className: 'setup-sub' }, __pc.chunkCount + ' chunks indexed so far'),
     ),
 
+    !showSettings && status === 'ready' && !pageReady && h('div', { className: 'setup' },
+      h('p', { className: 'setup-msg' }, 'Switching page…'),
+      h(ProgressBar, { progress: 0, pulse: true }),
+    ),
+
     !showSettings && (isReady || (modelLoaded && msgs.length > 0)) && h(React.Fragment, null,
       h('div', { className: 'msgs' },
         msgs.length === 0 && h(React.Fragment, null,
@@ -1201,7 +1253,9 @@ function App() {
           settings.showSuggestions && suggestions.length === 0 && isReady && h('div', { className: 'suggestions-loading' }, '…'),
         ),
         (agentBusy ? agentMsgs : msgs).map((m, i) =>
-          m.role === 'user'
+          m.role === 'nav'
+            ? h('div', { key: i, className: 'msg-nav' }, '📄 ', m.content)
+            : m.role === 'user'
             ? h('div', { key: i, className: 'msg msg-user' }, m.content)
             : m.isAgent
             ? h('div', { key: i, className: 'msg msg-agent' }, m.content)

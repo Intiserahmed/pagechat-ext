@@ -151,6 +151,7 @@ body {
 }
 .msg-user { background: var(--green); color: var(--green-ink); align-self: flex-end; border-radius: 10px 10px 3px 10px; font-weight: 500; white-space: pre-wrap; }
 .msg-ai   { background: var(--bg-2); color: var(--ink-2); align-self: flex-start; border: 1px solid var(--line); border-radius: 10px 10px 10px 3px; }
+.msg-nav  { align-self: center; font-size: 10px; color: var(--muted); background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Markdown elements inside AI messages */
 .msg-ai .md-p  { margin: 0; }
