@@ -3,7 +3,7 @@
 let _hostTabId          = null;
 let _pendingReturnTabId = null;   // tab to restore focus to after model loads
 let _ensurePromise      = null;   // deduplicates concurrent ensureModelHost calls
-let _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
+let _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0, modelBusy: false, busyTabId: null };
 let _reconnecting       = false;  // true when recreating after tab was closed — skip focus steal
 
 // CDP state (agent loop)
@@ -124,6 +124,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       useEmbed:    msg.useEmbed,
       chunkCount:  msg.chunkCount,
       cachedPages: msg.cachedPages,
+      modelBusy:   msg.modelBusy  ?? false,
+      busyTabId:   msg.busyTabId  ?? null,
     };
     // Model finished loading — return focus to the user's original tab
     if (msg.status === 'ready-no-index' && _pendingReturnTabId !== null) {

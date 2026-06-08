@@ -516,7 +516,7 @@ function renderMd(text) {
 const IS_SIDEBAR = window === window.top;
 
 function App() {
-  const [state, setState]       = useState({ status: 'idle', progress: 0, useEmbed: false });
+  const [state, setState]       = useState({ status: 'idle', progress: 0, useEmbed: false, modelBusy: false, busyTabId: null });
   const [pageInfo, setPageInfo] = useState({ title: '', url: '' });
   const [msgs, setMsgs]         = useState([]);
   const [agentMsgs, setAgentMsgs] = useState([]); // isolated agent messages — never reset by loadTab
@@ -538,7 +538,9 @@ function App() {
   const tabIdRef       = useRef(null);   // tab ID — set once loadTab runs, used for chat persistence
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
-  const { status, progress, useEmbed } = state;
+  const { status, progress, useEmbed, modelBusy, busyTabId } = state;
+  // Another tab is currently generating — block sending from this tab
+  const otherTabBusy = modelBusy && busyTabId !== null && busyTabId !== (tabIdRef.current || _urlTabId);
   const isReady      = status === 'ready' && pageReady;
   const modelLoaded  = status === 'ready' || status === 'ready-no-index'; // model loaded, page may not be indexed
   const isLoading    = ['loading-embed', 'loading-chat', 'indexing'].includes(status);
@@ -566,7 +568,7 @@ function App() {
     chrome.runtime.sendMessage({ type: 'PC_CMD_STATE' }, cached => {
       void chrome.runtime.lastError;
       if (cached) {
-        setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed });
+        setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed, modelBusy: cached.modelBusy ?? false, busyTabId: cached.busyTabId ?? null });
         if (cached.status === 'idle') {
           // Apply persisted embed preference before starting the load
           chrome.storage.sync.get({ useEmbed: false }, ({ useEmbed }) => {
@@ -581,7 +583,7 @@ function App() {
         });
       }
     });
-    return __pc.subscribe(s => setState({ status: s.status, progress: s.progress, useEmbed: s.useEmbed }));
+    return __pc.subscribe(s => setState({ status: s.status, progress: s.progress, useEmbed: s.useEmbed, modelBusy: s.modelBusy ?? false, busyTabId: s.busyTabId ?? null }));
   }, []);
 
   // Tab change listener — update page pill, restore history, re-index / restore cache
@@ -1291,14 +1293,15 @@ function App() {
         ),
         h('div', { ref: bottomRef }),
       ),
+      otherTabBusy && h('div', { className: 'other-tab-busy' }, '⟳ AI is generating in another tab…'),
       h('div', { className: 'input-row' },
         h('input', {
           className: 'input',
           value: input,
           onChange: e => setInput(e.target.value),
-          onKeyDown: e => e.key === 'Enter' && !agentBusy && !busy && (IS_SIDEBAR ? runAgent(input) : send(input)),
-          placeholder: agentBusy ? 'Agent running…' : IS_SIDEBAR ? 'What should the agent do?' : 'Ask about this page…',
-          disabled: busy || agentBusy,
+          onKeyDown: e => e.key === 'Enter' && !agentBusy && !busy && !otherTabBusy && (IS_SIDEBAR ? runAgent(input) : send(input)),
+          placeholder: otherTabBusy ? 'AI busy in another tab…' : agentBusy ? 'Agent running…' : IS_SIDEBAR ? 'What should the agent do?' : 'Ask about this page…',
+          disabled: busy || agentBusy || otherTabBusy,
           autoFocus: true,
         }),
         isReady && !busy && !agentBusy && isYouTubeVideo(pageInfo.url)
@@ -1328,7 +1331,7 @@ function App() {
           : h('button', {
               className: 'btn-send',
               onClick: () => IS_SIDEBAR ? runAgent(input) : send(input),
-              disabled: !input.trim(),
+              disabled: !input.trim() || otherTabBusy,
               title: IS_SIDEBAR ? 'Run agent' : 'Send',
             }, IS_SIDEBAR ? '⚡' : Ic.send()),
       ),

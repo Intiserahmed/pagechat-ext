@@ -195,6 +195,19 @@ body {
 .cur { color: var(--green); animation: blink .9s step-end infinite; }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
 
+/* ── Other-tab busy banner ── */
+.other-tab-busy {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+  padding: 5px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-1);
+  animation: blink .9s step-end infinite;
+  flex-shrink: 0;
+}
+
 /* ── Input row ── */
 .input-row {
   display: flex;

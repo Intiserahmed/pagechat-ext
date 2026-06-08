@@ -94,14 +94,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
 
     case 'PC_CMD_SUMMARIZE':
+      pc.setBusy(true, msg.tabId);
       pc.summarize(
         token => chrome.runtime.sendMessage({ type: 'PC_TOKEN', tabId: msg.tabId, token }).catch(() => {}),
         progress => chrome.runtime.sendMessage({ type: 'PC_SUMMARIZE_PROGRESS', tabId: msg.tabId, progress }).catch(() => {}),
       )
         .then(() => {
+          pc.setBusy(false, null);
           chrome.runtime.sendMessage({ type: 'PC_CHAT_DONE', tabId: msg.tabId }).catch(() => {});
         })
         .catch(e => {
+          pc.setBusy(false, null);
           chrome.runtime.sendMessage({ type: 'PC_ERROR', tabId: msg.tabId, message: e.message }).catch(() => {});
         });
       break;
@@ -165,15 +168,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
 
     case 'PC_CMD_CHAT':
+      pc.setBusy(true, msg.tabId);
       pc.chat(
         msg.messages,
         token => chrome.runtime.sendMessage({ type: 'PC_TOKEN', tabId: msg.tabId, token }).catch(() => {}),
         msg.opts,
       )
         .then(() => {
+          pc.setBusy(false, null);
           chrome.runtime.sendMessage({ type: 'PC_CHAT_DONE', tabId: msg.tabId }).catch(() => {});
         })
         .catch(e => {
+          pc.setBusy(false, null);
           chrome.runtime.sendMessage({ type: 'PC_ERROR', tabId: msg.tabId, message: e.message }).catch(() => {});
         });
       break;
