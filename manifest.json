@@ -45,6 +45,7 @@
       "lib/embed-ort.js",
       "lib/ort.min.js",
       "lib/ort-wasm-simd-threaded.wasm",
+      "lib/ort-wasm-simd-threaded.mjs",
       "lib/bge-vocab.txt"
     ],
     "matches": ["<all_urls>"]
