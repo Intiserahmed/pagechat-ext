@@ -20,6 +20,9 @@ window.addEventListener('unhandledrejection', (e) => {
   if (e.reason?.message?.includes('Extension context invalidated')) window.location.reload();
 });
 
+// Tab ID embedded in iframe URL by content.js (?tabId=X). Null in sidebar mode.
+const _urlTabId = parseInt(new URLSearchParams(location.search).get('tabId')) || null;
+
 // ── Proxy to offscreen model host ────────────────────────────────────────────
 // All AI operations are routed as chrome.runtime messages to model-host.js.
 // Responses stream back as PC_STATE / PC_TOKEN / PC_CHAT_DONE / PC_ERROR /
@@ -41,7 +44,6 @@ const __pc = (() => {
   // FAB iframes get their tab ID embedded in the URL (?tabId=X) by content.js.
   // This is reliable even when the tab is in the background at injection time.
   // Sidebar (IS_SIDEBAR=true) has no URL param — falls back to active-tab query.
-  const _urlTabId = parseInt(new URLSearchParams(location.search).get('tabId')) || null;
   let _myTabId = _urlTabId;
   if (!_urlTabId) {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {

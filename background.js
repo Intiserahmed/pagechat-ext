@@ -278,7 +278,7 @@ async function cdpExecuteAction(tabId, action, index, value, direction) {
 // ── CDP message handlers ───────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'GET_MY_TAB_ID') {
-    sendResponse(sender.tab?.id ?? null);
+    sendResponse(_sender.tab?.id ?? null);
     return true;
   }
 
