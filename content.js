@@ -179,6 +179,14 @@ function executeAgentAction(action, index, value, direction) {
 
 // ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (msg.type === 'HIDE_FAB') {
+    document.getElementById('arkhon-host')?.remove();
+    return;
+  }
+  if (msg.type === 'SHOW_FAB') {
+    injectFAB(); // reinject with fresh iframe = new chat session
+    return;
+  }
   if (msg.type === 'GET_DOM_TREE') {
     let result = buildDomTree();
     // Only apply HTML heuristics pre-filter when there are many elements (> 30).
@@ -313,7 +321,7 @@ async function tryInnerTube(videoId, client) {
 }
 
 // ── FAB overlay injection ──────────────────────────────────────────────────
-(function injectFAB() {
+function injectFAB() {
   if (document.getElementById('arkhon-host')) return;
 
   const host = document.createElement('div');
@@ -329,29 +337,29 @@ async function tryInnerTube(videoId, client) {
         position: fixed;
         bottom: 24px;
         right: 24px;
-        width: 50px;
-        height: 50px;
-        border-radius: 50%;
-        background: #c8f24e;
-        color: #0c0e0b;
+        width: 52px;
+        height: 52px;
+        border-radius: 14px;
+        background: transparent;
         border: none;
         cursor: pointer;
         display: grid;
         place-items: center;
+        padding: 0;
+        overflow: hidden;
         box-shadow: 0 4px 20px rgba(0,0,0,.4);
         transition: transform .15s ease, box-shadow .15s ease;
         z-index: 2147483646;
       }
       .fab:hover { transform: scale(1.08); box-shadow: 0 6px 28px rgba(0,0,0,.5); }
-      .fab.open  { background: #1c1f19; color: #c8f24e; box-shadow: 0 4px 20px rgba(200,242,78,.2); }
+      .fab.open  { box-shadow: 0 4px 20px rgba(200,242,78,.3); }
       .fab.processing { animation: fabRing 1.6s ease-out infinite; }
       @keyframes fabRing {
         0%   { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 0   rgba(200,242,78,.5); }
         70%  { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 9px rgba(200,242,78,0); }
         100% { box-shadow: 0 4px 20px rgba(0,0,0,.4), 0 0 0 0   rgba(200,242,78,0); }
       }
-      .fab svg { transition: transform .2s ease; }
-      .fab.open svg { transform: rotate(90deg); }
+      .fab img { display: block; }
 
       /* tap burst — two expanding rings */
       .fab::after {
@@ -368,16 +376,16 @@ async function tryInnerTube(videoId, client) {
         100% { box-shadow: 0 0 0 22px rgba(200,242,78,0),  0 0 0 44px rgba(200,242,78,0); }
       }
       /* icon squeeze + bounce on tap */
-      .fab.tapped svg { animation: fabBounce .4s cubic-bezier(.36,.07,.19,.97) forwards; }
+      .fab.tapped img { animation: fabBounce .4s cubic-bezier(.36,.07,.19,.97) forwards; }
       @keyframes fabBounce {
         0%   { transform: scale(1); }
-        25%  { transform: scale(.78) rotate(-10deg); }
-        60%  { transform: scale(1.2) rotate(6deg); }
-        100% { transform: scale(1)  rotate(0deg); }
+        25%  { transform: scale(.78); }
+        60%  { transform: scale(1.2); }
+        100% { transform: scale(1); }
       }
 
 
-      .chat-wrap {
+.chat-wrap {
         position: fixed;
         bottom: 86px;
         right: 24px;
@@ -409,18 +417,7 @@ async function tryInnerTube(videoId, client) {
     </style>
 
     <button class="fab" id="fab" title="Arkhon AI">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <!-- Mirrored chat bubble (tail bottom-right) -->
-        <g transform="translate(24,0) scale(-1,1)">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </g>
-        <!-- ✦ ✦ ✦ three sparkles like typing dots -->
-        <path fill="currentColor" stroke="none" d="
-          M9  7.8l.4 1.1 1.1.4-1.1.4L9  10.8l-.4-1.1-1.1-.4 1.1-.4z
-          M12 7.8l.4 1.1 1.1.4-1.1.4L12 10.8l-.4-1.1-1.1-.4 1.1-.4z
-          M15 7.8l.4 1.1 1.1.4-1.1.4L15 10.8l-.4-1.1-1.1-.4 1.1-.4z
-        "/>
-      </svg>
+      <img src="${chrome.runtime.getURL('icons/icon48.png')}" width="52" height="52" style="display:block;" alt="Arkhon AI"/>
     </button>
 
     <div class="chat-wrap" id="chat-wrap">
@@ -428,28 +425,28 @@ async function tryInnerTube(videoId, client) {
     </div>
   `;
 
-  const fab       = shadow.getElementById('fab');
-  const chatWrap  = shadow.getElementById('chat-wrap');
+  const fab      = shadow.getElementById('fab');
+  const chatWrap = shadow.getElementById('chat-wrap');
   let open = false;
 
-  fab.addEventListener('click', () => {
-    open = !open;
+  function setOpen(val) {
+    open = val;
     fab.classList.toggle('open', open);
     chatWrap.classList.toggle('open', open);
+  }
+
+  fab.addEventListener('click', () => {
+    setOpen(!open);
     // Tap burst animation
     fab.classList.remove('tapped');
-    void fab.offsetWidth; // reflow to restart animation
+    void fab.offsetWidth;
     fab.classList.add('tapped');
     fab.addEventListener('animationend', () => fab.classList.remove('tapped'), { once: true });
   });
 
   // Close on Escape
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && open) {
-      open = false;
-      fab.classList.remove('open');
-      chatWrap.classList.remove('open');
-    }
+    if (e.key === 'Escape' && open) setOpen(false);
   });
 
   // Show pulsing ring on FAB while model is loading or indexing
@@ -460,4 +457,6 @@ async function tryInnerTube(videoId, client) {
   });
 
   document.documentElement.appendChild(host);
-})();
+}
+
+injectFAB();

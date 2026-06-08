@@ -116,7 +116,7 @@ const __pc = (() => {
 
       case 'PC_EMBED_FILTER_RESULT':
         if (msg.tabId === _myTabId && _embedFilterResolve) {
-          _embedFilterResolve({ text: msg.text });
+          _embedFilterResolve({ text: msg.text, indexMap: msg.indexMap });
           _embedFilterResolve = null;
         }
         break;
@@ -475,6 +475,9 @@ function renderMd(text) {
 }
 
 // ── Main app ─────────────────────────────────────────────────────────────────
+// True when running as Chrome side panel (extension page), false when in FAB iframe
+const IS_SIDEBAR = window === window.top;
+
 function App() {
   const [state, setState]       = useState({ status: 'idle', progress: 0, useEmbed: false });
   const [pageInfo, setPageInfo] = useState({ title: '', url: '' });
@@ -683,6 +686,7 @@ function App() {
     setInput('');
     setAgentMsgs([{ role: 'user', content: initialGoal }]);
 
+
     const MAX_STEPS = 12;
     const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
 
@@ -720,8 +724,8 @@ function App() {
         const updateStep = (content) => setAgentMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
         setAgentMsgs(m => [...m, { role: 'assistant', content: `⟳ Filtering ${domResult.count} elements…`, isAgent: true }]);
 
-        // Filter DOM to top-5 most relevant elements for the current goal
-        const { text: filteredText } = await __pc.embedFilter(
+        // Filter DOM to top-5 most relevant elements, sorted best-match first, renumbered 1-5
+        const { text: filteredText, indexMap } = await __pc.embedFilter(
           initialGoal, domResult.text, 5,
           (status) => updateStep(`⟳ ${status}`),
         );
@@ -729,14 +733,14 @@ function App() {
         const keptCount = filteredText.split('\n').filter(Boolean).length;
         updateStep(`⟳ Thinking… (${keptCount} elements)`);
 
-        // Ask LLM what to do next — passes full goal + history of completed actions
+        // Ask LLM what to do next
         const parsed = await __pc.agentStep(initialGoal, filteredText, actionHistory);
         const action = parsed.action;
 
         const elLabel = (idx) => {
-          const line = filteredText.split('\n').find(l => l.startsWith(`[${idx}]`));
-          if (!line) return `[${idx}]`;
-          return `"${line.replace(/^\[\d+\]\s*/, '').slice(0, 50)}"`;
+          const line = filteredText.split('\n').find(l => l.startsWith(`${idx}.`));
+          if (!line) return `element ${idx}`;
+          return `"${line.replace(/^\d+\.\s*/, '').slice(0, 50)}"`;
         };
 
         let actionSummary;
@@ -754,7 +758,8 @@ function App() {
           break;
         }
 
-        const origIndex = parsed.index;
+        // Map LLM's 1-based position back to real CDP index
+        const origIndex = (indexMap && parsed.index != null) ? (indexMap[parsed.index] ?? parsed.index) : parsed.index;
 
         if (action === 'navigate') {
           chrome.tabs.update(tab.id, { url: parsed.url });
@@ -784,6 +789,13 @@ function App() {
 
         // Record what was done so the LLM knows on the next step
         actionHistory.push(actionSummary);
+
+        // Stuck detection — same action repeated twice in a row means the agent is looping
+        if (actionHistory.length >= 2 &&
+            actionHistory[actionHistory.length - 1] === actionHistory[actionHistory.length - 2]) {
+          setAgentMsgs(m => [...m, { role: 'assistant', content: '⚠ Agent stuck — same action repeated. Stopping.', isAgent: true }]);
+          break;
+        }
 
         await sleep(300);
       }
@@ -1029,7 +1041,28 @@ function App() {
         Ic.dot(isReady),
         h('span', { className: 'hd-title' }, 'Arkhon AI'),
       ),
-      h('div', { className: 'hd-l', style: { gap: '6px' } },
+      h('div', { className: 'hd-l', style: { gap: '8px' } },
+        h('div', { className: 'mode-toggle' },
+          h('button', {
+            className: !IS_SIDEBAR ? 'active' : '',
+            onClick: () => {
+              if (IS_SIDEBAR) {
+                // Switch back to chat — reinject FAB, clear flag, close this panel
+                chrome.runtime.sendMessage({ type: 'RESTORE_CHAT' }).catch(() => {});
+                window.close();
+              }
+            },
+          }, 'Chat'),
+          h('button', {
+            className: IS_SIDEBAR ? 'active' : '',
+            onClick: () => {
+              if (!IS_SIDEBAR) {
+                // Switch to agent — open sidebar, remove FAB
+                chrome.runtime.sendMessage({ type: 'OPEN_SIDE_PANEL' }).catch(() => {});
+              }
+            },
+          }, 'Agent'),
+        ),
         h('button', {
           className: 'btn-ghost btn-sm' + (showSettings ? ' active' : ''),
           onClick: () => setShowSettings(s => !s),
@@ -1106,8 +1139,8 @@ function App() {
           className: 'input',
           value: input,
           onChange: e => setInput(e.target.value),
-          onKeyDown: e => e.key === 'Enter' && !agentBusy && send(input),
-          placeholder: agentBusy ? 'Agent running…' : 'Ask about this page…',
+          onKeyDown: e => e.key === 'Enter' && !agentBusy && !busy && (IS_SIDEBAR ? runAgent(input) : send(input)),
+          placeholder: agentBusy ? 'Agent running…' : IS_SIDEBAR ? 'What should the agent do?' : 'Ask about this page…',
           disabled: busy || agentBusy,
           autoFocus: true,
         }),
@@ -1124,15 +1157,14 @@ function App() {
               title: 'Summarize this page',
               style: { flexShrink: 0 },
             }, Ic.summarize()),
-        isReady && !busy && !agentBusy && h('button', {
-          className: 'btn-agent',
-          onClick: () => runAgent(input),
-          disabled: !input.trim(),
-          title: 'Run agent — Arkhon will act on the page to complete your goal',
-        }, '⚡'),
         busy || agentBusy
           ? h('button', { className: 'btn-stop', onClick: () => { __pc.stop(); setAgentBusy(false); }, title: 'Stop' }, Ic.stop())
-          : h('button', { className: 'btn-send', onClick: () => send(input), disabled: !input.trim() }, Ic.send()),
+          : h('button', {
+              className: 'btn-send',
+              onClick: () => IS_SIDEBAR ? runAgent(input) : send(input),
+              disabled: !input.trim(),
+              title: IS_SIDEBAR ? 'Run agent' : 'Send',
+            }, IS_SIDEBAR ? '⚡' : Ic.send()),
       ),
     ),
 

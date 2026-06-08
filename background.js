@@ -17,7 +17,11 @@ let _sidepanelPort = null;
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'sidepanel') return;
   _sidepanelPort = port;
-  port.onDisconnect.addListener(() => { _sidepanelPort = null; });
+  port.onDisconnect.addListener(() => {
+    _sidepanelPort = null;
+    // Side panel closed — clear flag so FAB reappears on next page load
+    chrome.storage.session.remove('sidebarOpen');
+  });
 });
 
 function notifySidepanel(msg) {
@@ -84,6 +88,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tabId === _hostTabId) return;
   if (changeInfo.status === 'complete' && tab.url) {
     notifySidepanel({ type: 'TAB_UPDATED', url: tab.url });
+    // If sidebar is open, suppress FAB on newly loaded page
+    chrome.storage.session.get('sidebarOpen', ({ sidebarOpen }) => {
+      if (sidebarOpen) chrome.tabs.sendMessage(tabId, { type: 'HIDE_FAB' }).catch(() => {});
+    });
   }
 });
 
@@ -247,6 +255,24 @@ async function cdpExecuteAction(tabId, action, index, value, direction) {
 
 // ── CDP message handlers ───────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'OPEN_SIDE_PANEL') {
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+      if (!tab) return;
+      chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+      chrome.storage.session.set({ sidebarOpen: true });
+      chrome.tabs.sendMessage(tab.id, { type: 'HIDE_FAB' }).catch(() => {});
+    });
+    return;
+  }
+
+  if (msg.type === 'RESTORE_CHAT') {
+    chrome.storage.session.remove('sidebarOpen');
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+      if (tab) chrome.tabs.sendMessage(tab.id, { type: 'SHOW_FAB' }).catch(() => {});
+    });
+    return;
+  }
+
   if (msg.type === 'AGENT_START') {
     cdpAttach(msg.tabId)
       .then(() => sendResponse({ ok: true }))

@@ -4,7 +4,10 @@
   "short_name": "Arkhon",
   "version": "0.2.0",
   "description": "Your local AI agent on every page. On-device LLM + RAG — zero data sent to any server.",
-  "permissions": ["activeTab", "scripting", "storage", "debugger"],
+  "permissions": ["activeTab", "scripting", "storage", "debugger", "sidePanel"],
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
@@ -34,6 +37,10 @@
   },
   "web_accessible_resources": [{
     "resources": [
+      "icons/icon16.png",
+      "icons/icon32.png",
+      "icons/icon48.png",
+      "icons/icon128.png",
       "sidepanel/index.html",
       "sidepanel/app.js",
       "sidepanel/styles.css",
