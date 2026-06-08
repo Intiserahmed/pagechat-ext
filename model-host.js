@@ -22,8 +22,27 @@ pc.subscribe(() => broadcast());
 // Push initial state so any open iframes sync immediately
 broadcast();
 
-// Auto-start model load when this tab is created
-pc.loadModels();
+// Auto-start model load with retry on failure
+(async () => {
+  const MAX_ATTEMPTS = 3;
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    try {
+      await pc.loadModels();
+      return;
+    } catch (e) {
+      console.warn(`[arkhon] loadModels attempt ${i + 1} failed:`, e);
+      if (i < MAX_ATTEMPTS - 1) {
+        await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+      } else {
+        // All attempts failed — broadcast error so UI can show it
+        chrome.runtime.sendMessage({
+          type: 'PC_STATE', status: 'error', progress: 0,
+          useEmbed: false, chunkCount: 0, cachedPages: 0,
+        }).catch(() => {});
+      }
+    }
+  }
+})();
 
 let _lastKnowledgeText = '';   // dedup: skip re-index if text unchanged
 let _indexingKnowledge = false; // dedup: skip concurrent calls

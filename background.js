@@ -65,12 +65,16 @@ async function _doEnsureModelHost() {
   chrome.storage.session.set({ hostTabId: tab.id });
 }
 
-// When the host tab is closed, clear state so next command recreates it
+// When the host tab is closed, auto-recreate it immediately so model stays warm
 chrome.tabs.onRemoved.addListener(tabId => {
   if (tabId === _hostTabId) {
     _hostTabId   = null;
     _cachedState = { status: 'idle', progress: 0, useEmbed: false, chunkCount: 0, cachedPages: 0 };
     chrome.storage.session.remove('hostTabId');
+    // Notify sidepanel so it can show reconnecting state
+    notifySidepanel({ type: 'PC_STATE', ..._cachedState });
+    // Recreate in background immediately — don't wait for next command
+    ensureModelHost().catch(console.error);
   }
   if (tabId === _cdpTabId) {
     _cdpTabId  = null;
@@ -126,9 +130,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
-  // Any command — ensure the host tab is alive (lazy creation)
-  // PC_CMD_RESTORE response comes from the host tab's own listener; don't interfere.
-  if (msg.type?.startsWith('PC_CMD_')) {
+  // Ensure host tab alive for commands that actually need the model.
+  // PC_CMD_STATE_REQ and PC_CMD_RESTORE don't need a live model tab.
+  const NEEDS_HOST = new Set([
+    'PC_CMD_LOAD', 'PC_CMD_INDEX', 'PC_CMD_CHAT', 'PC_CMD_SUMMARIZE',
+    'PC_CMD_SUGGEST', 'PC_CMD_FILL', 'PC_CMD_EMBED_FILTER',
+    'PC_CMD_AGENT_STEP', 'PC_CMD_REMAINING_GOAL', 'PC_CMD_INDEX_KNOWLEDGE',
+  ]);
+  if (NEEDS_HOST.has(msg.type)) {
     ensureModelHost().catch(console.error);
   }
 });

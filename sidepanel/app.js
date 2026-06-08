@@ -310,7 +310,10 @@ const Ic = {
 };
 
 // ── Status label ─────────────────────────────────────────────────────────────
-function statusLabel(status, progress) {
+function statusLabel(status, progress, reconnecting) {
+  if (reconnecting && (status === 'idle' || status === 'loading-embed' || status === 'loading-chat')) {
+    return progress > 0 ? `Reconnecting… ${progress}%` : 'Reconnecting…';
+  }
   switch (status) {
     case 'idle':           return 'Loading models…';
     case 'loading-embed':  return progress > 0 ? `Loading embed model… ${progress}%` : 'Loading embed model…';
@@ -494,13 +497,18 @@ function App() {
   const settingsRef   = useRef(settings);
   const currentUrlRef = useRef('');
   const loadTabRef    = useRef(null);   // lets status effect re-trigger loadTab
-  const prevStatusRef = useRef('idle'); // tracks previous status for transition detection
+  const prevStatusRef  = useRef('idle'); // tracks previous status for transition detection
+  const wasReadyRef    = useRef(false);  // true once model has been ready — used for reconnecting label
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const { status, progress, useEmbed } = state;
   const isReady      = status === 'ready';
   const modelLoaded  = status === 'ready' || status === 'ready-no-index'; // model loaded, page may not be indexed
   const isLoading    = ['loading-embed', 'loading-chat', 'indexing'].includes(status);
+  const reconnecting = wasReadyRef.current && (status === 'idle' || isLoading);
+
+  // Track when model has ever been ready so we can show "Reconnecting" on reload
+  if (modelLoaded) wasReadyRef.current = true;
 
   // Load persisted settings
   useEffect(() => {
@@ -1089,10 +1097,12 @@ function App() {
       h('button', { className: 'btn-primary', onClick: handleLoad }, 'Retry ', Ic.index()),
     ),
 
-    !showSettings && isLoading && status !== 'indexing' && h('div', { className: 'setup' },
-      h('p', { className: 'setup-msg' }, statusLabel(status, progress)),
-      h(ProgressBar, { progress, pulse: false }),
-      h('p', { className: 'setup-sub' }, 'Cached after this — instant on next open.'),
+    !showSettings && (isLoading || status === 'idle') && status !== 'indexing' && h('div', { className: 'setup' },
+      h('p', { className: 'setup-msg' }, statusLabel(status, progress, reconnecting)),
+      h(ProgressBar, { progress, pulse: status === 'idle' }),
+      h('p', { className: 'setup-sub' }, reconnecting
+        ? 'Model tab was closed — reloading in background…'
+        : 'Cached after this — instant on next open.'),
     ),
 
     !showSettings && status === 'ready-no-index' && useEmbed && h('div', { className: 'setup' },
