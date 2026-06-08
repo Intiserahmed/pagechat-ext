@@ -118,7 +118,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         })
         .catch(e => {
           // Embed failed — return original text unfiltered so agent can still run
-          chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, text: msg.domText, indexMap: null }).catch(() => {});
+          chrome.runtime.sendMessage({ type: 'PC_EMBED_FILTER_RESULT', tabId: msg.tabId, text: msg.domText }).catch(() => {});
         });
       break;
 

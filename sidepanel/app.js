@@ -116,7 +116,7 @@ const __pc = (() => {
 
       case 'PC_EMBED_FILTER_RESULT':
         if (msg.tabId === _myTabId && _embedFilterResolve) {
-          _embedFilterResolve({ text: msg.text, indexMap: msg.indexMap });
+          _embedFilterResolve({ text: msg.text });
           _embedFilterResolve = null;
         }
         break;
@@ -255,8 +255,8 @@ const __pc = (() => {
       });
     },
 
-    /** Filter DOM elements by nomic-embed cosine similarity. Returns { text, indexMap }. */
-    embedFilter(goal, domText, topK = 15, onStatus) {
+    /** Filter DOM elements by nomic-embed cosine similarity. Returns { text }. */
+    embedFilter(goal, domText, topK = 5, onStatus) {
       return new Promise((resolve, reject) => {
         _embedFilterResolve = resolve;
         _embedStatusCb = onStatus ?? null;
@@ -720,9 +720,9 @@ function App() {
         const updateStep = (content) => setAgentMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], content }; return n; });
         setAgentMsgs(m => [...m, { role: 'assistant', content: `⟳ Filtering ${domResult.count} elements…`, isAgent: true }]);
 
-        // Filter DOM to most relevant elements for the full goal
-        const { text: filteredText, indexMap } = await __pc.embedFilter(
-          initialGoal, domResult.text, 15,
+        // Filter DOM to top-5 most relevant elements for the current goal
+        const { text: filteredText } = await __pc.embedFilter(
+          initialGoal, domResult.text, 5,
           (status) => updateStep(`⟳ ${status}`),
         );
 
@@ -754,7 +754,7 @@ function App() {
           break;
         }
 
-        const origIndex = (indexMap && parsed.index != null) ? (indexMap[parsed.index] ?? parsed.index) : parsed.index;
+        const origIndex = parsed.index;
 
         if (action === 'navigate') {
           chrome.tabs.update(tab.id, { url: parsed.url });
