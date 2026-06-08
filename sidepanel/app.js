@@ -46,6 +46,7 @@ const __pc = (() => {
 
   // Central incoming-message router (offscreen → all extension pages)
   chrome.runtime.onMessage.addListener((msg) => {
+    try { if (!chrome.runtime?.id) return; } catch { return; } // extension context invalidated
     switch (msg.type) {
       case 'PC_STATE':
         _state = {
@@ -729,20 +730,22 @@ function App() {
     const MAX_STEPS = 12;
     const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
 
-    const getTabUrl = () => new Promise(r => chrome.tabs.get(tab.id, t => r(t?.url ?? '')));
+    const getTabUrl = () => new Promise(r => chrome.tabs.get(tab.id, t => { void chrome.runtime.lastError; r(t?.url ?? null); }));
+    const tabAlive  = () => new Promise(r => chrome.tabs.get(tab.id, t => { void chrome.runtime.lastError; r(!!t); }));
     const reattach  = () => new Promise(resolve => {
       chrome.runtime.sendMessage({ type: 'AGENT_START', tabId: tab.id }, r => { void chrome.runtime.lastError; resolve(r); });
     });
 
     // Wait for the tab to finish loading (used after navigation/click that changes URL)
     const waitForPageLoad = (timeout = 10000) => new Promise(resolve => {
-      const timer = setTimeout(resolve, timeout);
+      const done = () => {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(handler);
+        resolve();
+      };
+      const timer = setTimeout(done, timeout); // always clean up handler on timeout
       const handler = (updatedTabId, changeInfo) => {
-        if (updatedTabId === tab.id && changeInfo.status === 'complete') {
-          clearTimeout(timer);
-          chrome.tabs.onUpdated.removeListener(handler);
-          resolve();
-        }
+        if (updatedTabId === tab.id && changeInfo.status === 'complete') done();
       };
       chrome.tabs.onUpdated.addListener(handler);
     });
@@ -765,6 +768,10 @@ function App() {
 
       for (let step = 0; step < MAX_STEPS; step++) {
         if (agentAbortRef.current) break;
+        if (!await tabAlive()) {
+          setAgentMsgs(m => [...m, { role: 'assistant', content: '⚠ Tab was closed. Stopping.', isAgent: true }]);
+          break;
+        }
 
         // Get semantic element list via CDP Accessibility tree
         const domResult = await new Promise((resolve, reject) => {
@@ -779,7 +786,7 @@ function App() {
         setAgentMsgs(m => [...m, { role: 'assistant', content: `⟳ Filtering ${domResult.count} elements…`, isAgent: true }]);
 
         // Filter DOM to top-5 most relevant elements, sorted best-match first, renumbered 1-5
-        const { text: filteredText, indexMap } = await __pc.embedFilter(
+        const { text: filteredText = '', indexMap } = await __pc.embedFilter(
           initialGoal, domResult.text, 5,
           (status) => updateStep(`⟳ ${status}`),
         );
@@ -820,7 +827,7 @@ function App() {
           await waitForPageLoad();
           await reattach();
         } else {
-          const urlBefore = await getTabUrl();
+          const urlBefore = await getTabUrl(); // null if tab is dead
           const result = await new Promise(resolve => {
             chrome.runtime.sendMessage({
               type: 'EXECUTE_ACTION_CDP',
@@ -833,7 +840,7 @@ function App() {
           // After a navigating click, wait for full page load then re-attach CDP
           if (action === 'click') {
             const urlAfter = await getTabUrl();
-            if (urlAfter !== urlBefore) {
+            if (urlAfter !== null && urlBefore !== null && urlAfter !== urlBefore) {
               await waitForPageLoad();
               await reattach();
             } else {
@@ -1059,7 +1066,8 @@ function App() {
         if (thinkDelta || contentDelta) {
           setMsgs(m => {
             const n = [...m], last = n[n.length - 1];
-            n[n.length - 1] = { ...last, thinking: (last.thinking || '') + thinkDelta, content: last.content + contentDelta };
+            if (!last || last.role !== 'assistant') return m; // guard: msgs cleared by tab navigation
+            n[n.length - 1] = { ...last, thinking: (last.thinking || '') + thinkDelta, content: (last.content || '') + contentDelta };
             return n;
           });
         }
@@ -1084,10 +1092,15 @@ function App() {
         return m;
       });
     } catch (e) {
-      const msg = e.message?.includes('not indexed')
-        ? 'This page hasn\'t been indexed yet. Wait a moment for auto-indexing, or open Settings and check the page.'
-        : 'Error: ' + e.message;
-      setMsgs(m => { const n = [...m]; n[n.length-1] = { role: 'assistant', content: msg }; return n; });
+      if (e.message === 'Aborted') {
+        // User clicked stop — remove the empty assistant bubble
+        setMsgs(m => m[m.length-1]?.content === '' ? m.slice(0, -1) : m);
+      } else {
+        const msg = e.message?.includes('not indexed')
+          ? 'This page hasn\'t been indexed yet. Wait a moment for auto-indexing, or open Settings and check the page.'
+          : 'Error: ' + e.message;
+        setMsgs(m => { const n = [...m]; if (n[n.length-1]?.role === 'assistant') n[n.length-1] = { role: 'assistant', content: msg }; return n; });
+      }
     } finally {
       setBusy(false);
     }

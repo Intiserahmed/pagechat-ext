@@ -1,6 +1,9 @@
 // model-host.js — Offscreen document: loads wllama ONCE for the entire browser session.
 // All tabs communicate with this via chrome.runtime messages.
 
+// Warn before closing — closing unloads the model and triggers a reload
+window.addEventListener('beforeunload', e => { e.preventDefault(); e.returnValue = ''; });
+
 import './lib/wllama-bridge.js';
 
 const pc = window.__arkhon;

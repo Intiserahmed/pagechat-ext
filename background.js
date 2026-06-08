@@ -26,7 +26,9 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 function notifySidepanel(msg) {
-  if (_sidepanelPort) _sidepanelPort.postMessage(msg);
+  if (!_sidepanelPort) return;
+  try { _sidepanelPort.postMessage(msg); }
+  catch { _sidepanelPort = null; } // port moved to bfcache or otherwise dead
 }
 
 async function ensureModelHost() {
@@ -52,14 +54,16 @@ async function _doEnsureModelHost() {
     }
   }
 
-  // Remember which tab the user is on so we can return to it after model loads
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  _pendingReturnTabId = activeTab?.id ?? null;
-
   // Open active so Chrome grants a real WebGPU context — we switch back once the model is ready.
   // On reconnect (tab was dismissed), open in background to avoid stealing focus.
   const needsFocus = !_reconnecting;
   _reconnecting = false;
+
+  // Only track return tab on first load — reconnect opens inactive so no focus to restore
+  if (needsFocus) {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    _pendingReturnTabId = activeTab?.id ?? null;
+  }
   const tab = await chrome.tabs.create({
     url:    chrome.runtime.getURL('model-host.html'),
     active: needsFocus,
@@ -148,9 +152,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ── CDP (chrome.debugger) — agent loop: AX tree + reliable click/type ────────
-function cdpSend(tabId, method, params = {}) {
+function cdpSend(tabId, method, params = {}, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`CDP timeout: ${method}`)), timeoutMs);
     chrome.debugger.sendCommand({ tabId }, method, params, result => {
+      clearTimeout(timer);
       if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
       else resolve(result);
     });
@@ -164,6 +170,8 @@ async function cdpAttach(tabId) {
     _cdpTabId = null;
     _cdpNodeMap = {};
   }
+  // Detach any stale session on this tab (e.g. from a previous SW lifetime)
+  await new Promise(r => chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; r(); }));
   await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, '1.3', () => {
       if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
