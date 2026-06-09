@@ -974,14 +974,16 @@ function App() {
   const handleIndex = () => {
     const tabId = tabIdRef.current || _urlTabId;
     const sendMsg = (content) => setMsgs(m => m.length === 0 ? [{ role: 'assistant', content }] : m);
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (!tab?.id) return;
+    if (!tabId) { sendMsg("Couldn't determine tab ID — try refreshing the page."); return; }
+    chrome.tabs.get(tabId, (tab) => {
+      void chrome.runtime.lastError;
+      if (!tab) { sendMsg("Couldn't read this page. Try refreshing the tab, then re-read."); return; }
       const url = tab.url || '';
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
         sendMsg("Arkhon can't access this page. Navigate to a regular website and try again.");
         return;
       }
-      chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTENT' }, (resp) => {
+      chrome.tabs.sendMessage(tabId, { type: 'GET_PAGE_CONTENT' }, (resp) => {
         void chrome.runtime.lastError;
         if (!resp) {
           sendMsg("Couldn't read this page. Try refreshing the tab, then re-read.");
@@ -1012,9 +1014,9 @@ function App() {
     setMsgs(m => [...m, { role: 'assistant', content: 'Scanning page for form fields…', thinking: '' }]);
     setBusy(true);
 
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (!tab?.id) { setBusy(false); return; }
-      chrome.tabs.sendMessage(tab.id, { type: 'GET_FORM_FIELDS' }, async (resp) => {
+    const fillTabId = tabIdRef.current || _urlTabId;
+    if (!fillTabId) { setBusy(false); return; }
+    chrome.tabs.sendMessage(fillTabId, { type: 'GET_FORM_FIELDS' }, async (resp) => {
         void chrome.runtime.lastError;
         const fields = resp?.fields ?? [];
         if (fields.length === 0) {
@@ -1032,7 +1034,7 @@ function App() {
             updateLastMsg("Couldn't match any fields to your knowledge base — check your info in Settings.");
           } else {
             updateLastMsg(`Applying fills to **${count}** field${count > 1 ? 's' : ''}…`);
-            chrome.tabs.sendMessage(tab.id, { type: 'FILL_FIELDS', fills }, () => void chrome.runtime.lastError);
+            chrome.tabs.sendMessage(fillTabId, { type: 'FILL_FIELDS', fills }, () => void chrome.runtime.lastError);
             const filled = Object.entries(fills).map(([idx, val]) => {
               const f = fields[Number(idx)];
               return `· ${f?.label || f?.placeholder || f?.name || idx}: **${val}**`;
