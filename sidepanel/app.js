@@ -61,8 +61,8 @@ const __pc = (() => {
           status:      msg.status,
           progress:    msg.progress,
           useEmbed:    msg.useEmbed,
-          chunkCount:  msg.chunkCount,
-          cachedPages: msg.cachedPages,
+          modelBusy:   msg.modelBusy ?? false,
+          busyTabId:   msg.busyTabId ?? null,
         };
         _subs.forEach(fn => fn({ ..._state }));
         break;
@@ -160,6 +160,9 @@ const __pc = (() => {
       _tabSubs.add(fn);
       return () => _tabSubs.delete(fn);
     },
+
+    /** Sync internal state from bootstrap response so __pc.status reflects reality immediately. */
+    syncState(s) { Object.assign(_state, s); },
 
     /** Check if this tab already has a page index in model-host. */
     hasIndex(tabId) {
@@ -364,8 +367,8 @@ function statusLabel(status, progress, reconnecting) {
     case 'idle':           return 'Loading models…';
     case 'loading-embed':  return progress > 0 ? `Loading embed model… ${progress}%` : 'Loading embed model…';
     case 'loading-chat':   return progress > 0 ? `Loading model… ${progress}%` : 'Loading model…';
-    case 'indexing':       return `Indexing page… ${progress}%`;
-    case 'ready-no-index': return 'Models ready — index the current page';
+    case 'indexing':       return `Reading page… ${progress}%`;
+    case 'ready-no-index': return 'Models ready — read the current page';
     case 'ready':          return 'Ready';
     case 'error':          return 'Error — check console';
     default:               return status;
@@ -434,14 +437,14 @@ function SettingsPanel({ settings, onChange, knowledgeStatus, useEmbed, modelLoa
       h('span', null, '2 precise'), h('span', null, '6 broad'),
     ),
 
-    h('p', { className: 'set-section' }, 'Auto-index on page load'),
+    h('p', { className: 'set-section' }, 'Auto-read on page load'),
     h('label', { className: 'embed-toggle' },
       h('input', {
         type: 'checkbox',
         checked: settings.autoIndex,
         onChange: e => set('autoIndex', e.target.checked),
       }),
-      h('span', null, 'Index automatically when models are ready'),
+      h('span', null, 'Read page automatically when models are ready'),
     ),
 
     h('p', { className: 'set-section' }, 'Suggested questions'),
@@ -451,13 +454,13 @@ function SettingsPanel({ settings, onChange, knowledgeStatus, useEmbed, modelLoa
         checked: settings.showSuggestions,
         onChange: e => set('showSuggestions', e.target.checked),
       }),
-      h('span', null, 'Show 3 starter questions after indexing'),
+      h('span', null, 'Show 3 starter questions after reading'),
     ),
 
     /* Knowledge base / autofill — re-enable when embed model is fixed
     h('div', { className: 'set-section-row' },
       h('p', { className: 'set-section', style: { margin: 0 } }, 'Knowledge base (for form autofill)'),
-      knowledgeStatus === 'indexing' && h('span', { className: 'know-status' }, '⊙ indexing…'),
+      knowledgeStatus === 'indexing' && h('span', { className: 'know-status' }, '⊙ reading…'),
       knowledgeStatus === 'ready'    && h('span', { className: 'know-status ready' }, '✓ ready'),
     ),
     h('textarea', {
@@ -539,6 +542,7 @@ function App() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [suggestions, setSuggestions]         = useState([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState('idle'); // idle | indexing | ready
+  const [tabStatus, setTabStatus] = useState({ status: 'idle', progress: 0 });
   const bottomRef     = useRef(null);
   const settingsRef   = useRef(settings);
   const currentUrlRef = useRef('');
@@ -580,7 +584,9 @@ function App() {
     chrome.runtime.sendMessage({ type: 'PC_CMD_STATE', tabId }, cached => {
       void chrome.runtime.lastError;
       if (cached) {
-        setState({ status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed, modelBusy: cached.modelBusy ?? false, busyTabId: cached.busyTabId ?? null });
+        const s = { status: cached.status, progress: cached.progress, useEmbed: cached.useEmbed, modelBusy: cached.modelBusy ?? false, busyTabId: cached.busyTabId ?? null };
+        __pc.syncState(s);  // keep __pc.status in sync so loadTab doesn't exit early
+        setState(s);
         // Restore this tab's cached index status if available
         if (cached.tabState) setTabStatus(cached.tabState);
         if (cached.status === 'idle') {
@@ -601,7 +607,7 @@ function App() {
     return () => { unsubModel(); unsubTab(); };
   }, []);
 
-  // Tab change listener — update page pill, restore history, re-index / restore cache
+  // Tab change listener — update page pill, restore history, re-read / restore cache
   useEffect(() => {
     let debounce = null;
 
@@ -642,8 +648,8 @@ function App() {
             __pc.suggestQuestions(tabId).then(qs => setSuggestions(qs)).catch(() => {});
           }
         } else {
-          setTabStatus({ status: 'idle', progress: 0 });
-          handleIndex(); // PC_TAB_STATE events will drive setTabStatus automatically
+          setTabStatus({ status: 'indexing', progress: 0 }); // optimistic: skip "Index this page" flash
+          handleIndex(); // PC_TAB_STATE events will update real progress
         }
       };
 
@@ -964,11 +970,11 @@ function App() {
       chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTENT' }, (resp) => {
         void chrome.runtime.lastError;
         if (!resp) {
-          sendMsg("Couldn't read this page. Try refreshing the tab, then re-index.");
+          sendMsg("Couldn't read this page. Try refreshing the tab, then re-read.");
           return;
         }
         if (!resp.text || resp.text.trim().length < 200) {
-          sendMsg("Very little text found on this page — it may be a PDF, a JS-rendered app, or a login wall. Try scrolling to load content, then re-index.");
+          sendMsg("Very little text found on this page — it may be a PDF, a JS-rendered app, or a login wall. Try scrolling to load content, then re-read.");
           return;
         }
         setPageInfo({ title: resp.title, url: resp.url });
@@ -1073,7 +1079,7 @@ function App() {
         setBusy(false);
         return;
       }
-      updateLast({ thinking: 'Indexing transcript…' });
+      updateLast({ thinking: 'Reading transcript…' });
       await new Promise(res => {
         __pc.indexPage(result.text, tab.url);
         // Wait for this tab's indexing to complete via per-tab state
@@ -1167,7 +1173,7 @@ function App() {
         setMsgs(m => m[m.length-1]?.content === '' ? m.slice(0, -1) : m);
       } else {
         const msg = e.message?.includes('not indexed')
-          ? 'This page hasn\'t been indexed yet. Wait a moment for auto-indexing, or open Settings and check the page.'
+          ? 'This page hasn\'t been read yet. Wait a moment or click "Read this page".'
           : 'Error: ' + e.message;
         setMsgs(m => { const n = [...m]; if (n[n.length-1]?.role === 'assistant') n[n.length-1] = { role: 'assistant', content: msg }; return n; });
       }
@@ -1247,14 +1253,14 @@ function App() {
         : 'Cached after this — instant on next open.'),
     ),
 
-    !showSettings && status === 'ready' && useEmbed && tabStatus.status === 'idle' && h('div', { className: 'setup' },
+    !showSettings && status === 'ready' && tabStatus.status === 'idle' && h('div', { className: 'setup' },
       h('div', { className: 'setup-icon' }, '◎'),
-      h('p', { className: 'setup-msg' }, 'Models loaded. Index the current page to start chatting.'),
-      h('button', { className: 'btn-primary', onClick: handleIndex }, Ic.index(), ' Index this page'),
+      h('p', { className: 'setup-msg' }, 'Models loaded. Read this page to start chatting.'),
+      h('button', { className: 'btn-primary', onClick: handleIndex }, Ic.index(), ' Read this page'),
     ),
 
     !showSettings && status === 'ready' && tabStatus.status === 'indexing' && h('div', { className: 'setup' },
-      h('p', { className: 'setup-msg' }, 'Indexing page…'),
+      h('p', { className: 'setup-msg' }, 'Reading page…'),
       h(ProgressBar, { progress: tabStatus.progress, pulse: false }),
     ),
 
