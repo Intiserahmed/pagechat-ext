@@ -101,25 +101,29 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   notifySidepanel({ type: 'TAB_CHANGED' });
 });
 
+// Full-page navigation: changeInfo.url is only present when URL actually changes (not on reload)
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tabId === _hostTabId) return;
-  if (changeInfo.status === 'complete' && tab.url) {
-    notifySidepanel({ type: 'TAB_UPDATED', url: tab.url });
-    // If sidebar is open, suppress FAB on newly loaded page
+  if (changeInfo.status === 'complete') {
+    // Suppress FAB on newly loaded page if sidebar is open
     chrome.storage.session.get('sidebarOpen', ({ sidebarOpen }) => {
       if (sidebarOpen) chrome.tabs.sendMessage(tabId, { type: 'HIDE_FAB' }).catch(() => {});
     });
   }
+  // Only notify on actual URL change — reloads don't set changeInfo.url
+  if (changeInfo.url) {
+    notifySidepanel({ type: 'TAB_UPDATED', url: changeInfo.url });
+  }
+});
+
+// SPA navigation (pushState/replaceState/popstate) — covers YouTube, React Router, etc.
+chrome.webNavigation.onHistoryStateUpdated.addListener(({ tabId, url, frameId }) => {
+  if (frameId !== 0 || tabId === _hostTabId) return; // main frame only
+  notifySidepanel({ type: 'TAB_UPDATED', url });
 });
 
 // ── Message handling ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  // Content script relay: YouTube SPA navigation — push to sidepanel via port
-  if (msg.type === 'YT_NAVIGATE') {
-    notifySidepanel({ type: 'TAB_UPDATED', url: msg.url });
-    return;
-  }
-
   // Cache model state broadcasts from the host tab
   if (msg.type === 'PC_STATE') {
     _cachedState = {

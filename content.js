@@ -226,18 +226,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
 });
 
 
-// ── YouTube SPA navigation ────────────────────────────────────────────────
-// yt-navigate-finish fires after YouTube fully loads the new video — URL is settled.
-// Content scripts are persistent (unlike the SW), so this is reliable.
-if (location.hostname.includes('youtube.com')) {
-  let _lastYtUrl = location.href;
-  document.addEventListener('yt-navigate-finish', () => {
-    if (location.href !== _lastYtUrl) {
-      _lastYtUrl = location.href;
-      chrome.runtime.sendMessage({ type: 'YT_NAVIGATE', url: location.href }).catch(() => {});
-    }
-  });
-}
 
 // ── YouTube transcript extraction via InnerTube API ───────────────────────
 const YT_CLIENTS = [

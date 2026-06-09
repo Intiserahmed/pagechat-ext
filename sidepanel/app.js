@@ -619,18 +619,20 @@ function App() {
       setPageInfo({ title, url });
       currentUrlRef.current = url;
 
-      // Restore chat history keyed by tab ID — survives page navigations within the same tab
       const tabId = tab.id ?? __pc.tabId;
-      if (tabId) tabIdRef.current = tabId; // cache early so save useEffect never misses
-      if (tabId) {
+      if (tabId) tabIdRef.current = tabId;
+
+      // New URL → fresh session: clear chat and suggestions
+      if (prevUrl && url !== prevUrl && url.startsWith('http')) {
+        setMsgs([]);
+        setSuggestions([]);
+        setTabStatus({ status: 'indexing', progress: 0 });
+        // Clear stored history for this tab so the new page starts clean
+        if (tabId) chrome.storage.session.remove(`arkhon_msgs_tab_${tabId}`);
+      } else if (tabId) {
+        // Same URL (initial load or tab switch) — restore saved history
         chrome.storage.session.get(`arkhon_msgs_tab_${tabId}`, stored => {
-          const history = stored[`arkhon_msgs_tab_${tabId}`] ?? [];
-          // Insert a page-change divider when navigating to a new URL mid-session
-          if (prevUrl && url !== prevUrl && history.length > 0 && url.startsWith('http')) {
-            setMsgs([...history, { role: 'nav', content: title || url }]);
-          } else {
-            setMsgs(history);
-          }
+          setMsgs(stored[`arkhon_msgs_tab_${tabId}`] ?? []);
         });
       }
 
@@ -689,9 +691,18 @@ function App() {
     };
 
     const onTabUpdated = (updatedTabId, changeInfo, tab) => {
-      if (updatedTabId !== tabIdRef.current) return; // not our tab, ignore
-      if (changeInfo.status === 'complete' && tab.url) loadTab(tab);
+      if (updatedTabId !== tabIdRef.current) return;
+      // Only re-read on actual URL change — reloads have no changeInfo.url
+      if (changeInfo.status === 'complete' && tab.url && tab.url !== currentUrlRef.current) loadTab(tab);
     };
+
+    // SPA navigation (YouTube, React Router, etc.) — webNavigation fires before DOM settles,
+    // so loadTab uses its existing 400ms debounce to wait for content.
+    const onHistoryStateUpdated = ({ tabId: navTabId, url, frameId }) => {
+      if (frameId !== 0 || navTabId !== tabIdRef.current) return;
+      if (url !== currentUrlRef.current) loadTab({ id: navTabId, url }, false);
+    };
+    chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdated);
 
     chrome.tabs.onActivated.addListener(onTabActivated);
     chrome.tabs.onUpdated.addListener(onTabUpdated);
@@ -706,12 +717,14 @@ function App() {
         throw e;
       }
       port.onMessage.addListener((msg) => {
-        // YouTube SPA navigation fires YT_NAVIGATE → TAB_UPDATED via port (content script relay)
-        if (msg.type === 'TAB_UPDATED' && msg.url && tabIdRef.current) {
-          chrome.tabs.get(tabIdRef.current, tab => {
-            void chrome.runtime.lastError;
-            if (tab) loadTab({ ...tab, url: msg.url });
-          });
+        // Sidebar: background notifies URL changes via port (covers SPA + full-page nav)
+        if (msg.type === 'TAB_UPDATED' && msg.url && IS_SIDEBAR && tabIdRef.current) {
+          if (msg.url !== currentUrlRef.current) {
+            chrome.tabs.get(tabIdRef.current, tab => {
+              void chrome.runtime.lastError;
+              if (tab) loadTab({ ...tab, url: msg.url });
+            });
+          }
         }
       });
       port.onDisconnect.addListener(() => {
@@ -733,6 +746,7 @@ function App() {
     return () => {
       chrome.tabs.onActivated.removeListener(onTabActivated);
       chrome.tabs.onUpdated.removeListener(onTabUpdated);
+      chrome.webNavigation.onHistoryStateUpdated.removeListener(onHistoryStateUpdated);
       port.disconnect();
       clearTimeout(debounce);
     };
@@ -1276,9 +1290,7 @@ function App() {
           settings.showSuggestions && suggestions.length === 0 && isReady && h('div', { className: 'suggestions-loading' }, '…'),
         ),
         (agentBusy ? agentMsgs : msgs).map((m, i) =>
-          m.role === 'nav'
-            ? h('div', { key: i, className: 'msg-nav' }, '📄 ', m.content)
-            : m.role === 'user'
+          m.role === 'user'
             ? h('div', { key: i, className: 'msg msg-user' }, m.content)
             : m.isAgent
             ? h('div', { key: i, className: 'msg msg-agent' }, m.content)
