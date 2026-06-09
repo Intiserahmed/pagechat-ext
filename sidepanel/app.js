@@ -1089,9 +1089,12 @@ function App() {
     ]);
     const updateLast = (patch) => setMsgs(m => { const n = [...m]; n[n.length-1] = { ...n[n.length-1], ...patch }; return n; });
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tabId = tabIdRef.current || _urlTabId;
+      if (!tabId) { updateLast({ content: "Couldn't determine tab — try refreshing.", thinking: '' }); setBusy(false); return; }
+      const tab = await new Promise(res => chrome.tabs.get(tabId, t => { void chrome.runtime.lastError; res(t); }));
+      if (!tab) { updateLast({ content: "Couldn't access this tab — try refreshing.", thinking: '' }); setBusy(false); return; }
       const result = await Promise.race([
-        new Promise(res => chrome.tabs.sendMessage(tab.id, { type: 'GET_TRANSCRIPT' }, res)),
+        new Promise(res => chrome.tabs.sendMessage(tabId, { type: 'GET_TRANSCRIPT' }, res)),
         new Promise(res => setTimeout(() => res(null), 8000)),
       ]);
       if (!result?.text) {
