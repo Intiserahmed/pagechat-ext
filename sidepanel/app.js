@@ -1047,7 +1047,6 @@ function App() {
           setBusy(false);
         }
       });
-    });
   };
 
   const handleSummarize = async () => {
