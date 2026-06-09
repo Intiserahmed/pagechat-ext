@@ -1,5 +1,11 @@
 // content.js — Page text extraction + FAB overlay injection
 
+// Guard: returns false if the extension context is no longer valid (after reload/update).
+// Calling any chrome.* API with an invalidated context throws — this lets us bail cleanly.
+function chromeAlive() {
+  try { return !!chrome.runtime?.id; } catch { return false; }
+}
+
 // ── 1. JSON-LD structured data ─────────────────────────────────────────────
 function extractJsonLd() {
   const blocks = [];
@@ -177,8 +183,20 @@ function executeAgentAction(action, index, value, direction) {
   }
 }
 
+// ── bfcache handling ───────────────────────────────────────────────────────
+// YouTube (and other SPAs) use back/forward cache. When a bfcached page is
+// restored, extension port connections are dead. Remove the stale FAB and
+// reinject it fresh so the iframe reconnects with a live extension context.
+window.addEventListener('pageshow', (e) => {
+  if (!e.persisted) return; // normal load — nothing to do
+  if (!chromeAlive()) return; // extension was unloaded — can't reinject
+  document.getElementById('arkhon-host')?.remove();
+  injectFAB();
+});
+
 // ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (!chromeAlive()) return; // extension context invalidated — bail silently
   if (msg.type === 'HIDE_FAB') {
     document.getElementById('arkhon-host')?.remove();
     return;
@@ -311,21 +329,12 @@ async function tryInnerTube(videoId, client) {
 // ── FAB overlay injection ──────────────────────────────────────────────────
 function injectFAB() {
   if (document.getElementById('arkhon-host')) return;
-  // Get own tab ID from background (content scripts can't call chrome.tabs.getCurrent)
-  // so the FAB iframe always knows which tab it belongs to, even when opened in background
-  chrome.runtime.sendMessage({ type: 'GET_MY_TAB_ID' }, (tabId) => {
-    void chrome.runtime.lastError;
-    _createFAB(tabId);
-  });
-}
 
-function _createFAB(tabId) {
-  if (document.getElementById('arkhon-host')) return;
-
+  // Phase 1 — inject the button and container IMMEDIATELY (zero SW round-trip delay).
+  // The iframe is deferred to Phase 2 so the button appears before the SW wakes up.
   const host = document.createElement('div');
   host.id = 'arkhon-host';
   const shadow = host.attachShadow({ mode: 'open' });
-  const frameUrl = chrome.runtime.getURL('sidepanel/index.html') + (tabId ? '?tabId=' + tabId : '');
 
   shadow.innerHTML = `
     <style>
@@ -346,7 +355,8 @@ function _createFAB(tabId) {
         padding: 0;
         overflow: hidden;
         box-shadow: 0 4px 20px rgba(0,0,0,.4);
-        transition: transform .15s ease, box-shadow .15s ease;
+        opacity: 0; /* hidden until page finishes loading — revealed by revealFab() */
+        transition: transform .15s ease, box-shadow .15s ease, opacity .4s ease;
         z-index: 2147483646;
       }
       .fab:hover { transform: scale(1.08); box-shadow: 0 6px 28px rgba(0,0,0,.5); }
@@ -382,8 +392,7 @@ function _createFAB(tabId) {
         100% { transform: scale(1); }
       }
 
-
-.chat-wrap {
+      .chat-wrap {
         position: fixed;
         bottom: 86px;
         right: 24px;
@@ -398,6 +407,7 @@ function _createFAB(tabId) {
         transform: scale(0.94) translateY(10px);
         transform-origin: bottom right;
         transition: opacity .2s ease, transform .2s cubic-bezier(.34,1.4,.64,1);
+        background: #111; /* match app dark theme — prevents white flash while iframe loads */
       }
       .chat-wrap.open {
         opacity: 1;
@@ -419,13 +429,31 @@ function _createFAB(tabId) {
     </button>
 
     <div class="chat-wrap" id="chat-wrap">
-      <iframe id="chat-frame" src="${frameUrl}"></iframe>
+      <!-- iframe injected in Phase 2 once tab ID is known -->
     </div>
   `;
 
   const fab      = shadow.getElementById('fab');
   const chatWrap = shadow.getElementById('chat-wrap');
-  let open = false;
+  let open           = false;
+  let _frameInjected = false; // true once Phase 2 iframe is in the DOM
+  let _pendingOpen   = false; // user tapped before iframe was ready — open it when frame arrives
+
+  // Reveal FAB once page finishes loading so it doesn't pop in during render.
+  // Iframe and SW have had maximum warm-up time by then.
+  // Fallback: reveal after 4 s for slow/stuck pages so FAB is never permanently hidden.
+  let _revealed = false;
+  const revealFab = () => {
+    if (_revealed) return;
+    _revealed = true;
+    fab.style.opacity = '1';
+  };
+  if (document.readyState === 'complete') {
+    revealFab(); // page already loaded (e.g. bfcache restore)
+  } else {
+    window.addEventListener('load', revealFab, { once: true });
+    setTimeout(revealFab, 4000); // fallback for slow or stuck pages
+  }
 
   function setOpen(val) {
     open = val;
@@ -433,13 +461,21 @@ function _createFAB(tabId) {
     chatWrap.classList.toggle('open', open);
   }
 
-  fab.addEventListener('click', () => {
-    setOpen(!open);
-    // Tap burst animation
+  function tapAnimation() {
     fab.classList.remove('tapped');
     void fab.offsetWidth;
     fab.classList.add('tapped');
     fab.addEventListener('animationend', () => fab.classList.remove('tapped'), { once: true });
+  }
+
+  fab.addEventListener('click', () => {
+    tapAnimation();
+    if (!_frameInjected) {
+      // Iframe not ready yet — record intent and bail. injectFrame() will open on arrival.
+      _pendingOpen = !_pendingOpen;
+      return;
+    }
+    setOpen(!open);
   });
 
   // Close on Escape
@@ -450,11 +486,54 @@ function _createFAB(tabId) {
   // Show pulsing ring on FAB while model is loading or indexing
   const PROCESSING = new Set(['loading-embed', 'loading-chat', 'indexing']);
   chrome.runtime.onMessage.addListener((msg) => {
+    if (!chromeAlive()) return;
     if (msg.type !== 'PC_STATE') return;
     fab.classList.toggle('processing', PROCESSING.has(msg.status));
   });
 
   document.documentElement.appendChild(host);
+
+  // Phase 2 — get own tab ID from background, then inject iframe.
+  // Content scripts can't call chrome.tabs.getCurrent, so we ask the SW.
+  // The SW may need to wake up (100–200 ms cold start), so the iframe is deferred
+  // rather than blocking Phase 1. By the time a user clicks the FAB, it's ready.
+  const injectFrame = (tabId) => {
+    if (_frameInjected) return;
+    _frameInjected = true;
+    const frameUrl = chrome.runtime.getURL('sidepanel/index.html') + (tabId ? '?tabId=' + tabId : '');
+    const frame = document.createElement('iframe');
+    frame.id = 'chat-frame';
+    frame.src = frameUrl;
+    chatWrap.appendChild(frame);
+    // Honor a tap that happened before the iframe was ready
+    if (_pendingOpen) {
+      _pendingOpen = false;
+      setOpen(true);
+    }
+  };
+
+  try {
+    chrome.runtime.sendMessage({ type: 'GET_MY_TAB_ID' }, (tabId) => {
+      void chrome.runtime.lastError;
+      if (tabId) {
+        injectFrame(tabId);
+      } else {
+        // No response (SW context error) — retry once after a short delay
+        setTimeout(() => {
+          if (!chromeAlive()) return;
+          try {
+            chrome.runtime.sendMessage({ type: 'GET_MY_TAB_ID' }, (id) => {
+              void chrome.runtime.lastError;
+              injectFrame(id ?? null);
+            });
+          } catch {}
+        }, 500);
+      }
+    });
+  } catch {
+    // Extension context already invalidated at injection time — inject without tabId
+    injectFrame(null);
+  }
 }
 
 injectFAB();
