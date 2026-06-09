@@ -20,6 +20,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'sidepanel') return;
   _sidepanelPort = port;
   port.onDisconnect.addListener(() => {
+    void chrome.runtime.lastError; // clear bfcache / context-invalidated disconnect reason
     _sidepanelPort = null;
     // Side panel closed — clear flag so FAB reappears on next page load
     chrome.storage.session.remove('sidebarOpen');

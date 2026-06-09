@@ -732,6 +732,7 @@ function App() {
         }
       });
       port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError; // clear bfcache / context-invalidated disconnect reason
         // SW was killed — reconnect and request fresh state so sidepanel un-grays
         setTimeout(() => {
           connectPort();
