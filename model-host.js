@@ -64,6 +64,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   switch (msg.type) {
     case 'PC_CMD_LOAD':
+      broadcast(); // announce real state immediately — fixes SW-restart stale-cache stuck-idle
       pc.loadModels();
       break;
 

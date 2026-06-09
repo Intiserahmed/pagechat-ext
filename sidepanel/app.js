@@ -601,6 +601,10 @@ function App() {
           __pc.loadModels();
         });
       }
+      // Always ping model-host for its real state — corrects stale SW cache after SW restart.
+      // If model-host is alive and ready but SW cache says 'idle', this triggers the broadcast
+      // that transitions the app out of the stuck spinner state.
+      chrome.runtime.sendMessage({ type: 'PC_CMD_STATE_REQ' }).catch(() => {});
     });
     const unsubModel = __pc.subscribe(s => setState({ status: s.status, progress: s.progress, useEmbed: s.useEmbed, modelBusy: s.modelBusy ?? false, busyTabId: s.busyTabId ?? null }));
     const unsubTab   = __pc.subscribeTab(s => setTabStatus(s));
