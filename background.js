@@ -156,8 +156,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   // Ensure host tab alive for commands that actually need the model.
+  // PC_CMD_HAS_INDEX deliberately excluded: it's answered by model-host's in-memory state
+  // and resolves to false when the host is down — which is correct since the index is gone.
+  // Including it here would spawn the entire model host just to answer a boolean predicate.
   const NEEDS_HOST = new Set([
-    'PC_CMD_LOAD', 'PC_CMD_INDEX', 'PC_CMD_HAS_INDEX', 'PC_CMD_CHAT', 'PC_CMD_SUMMARIZE',
+    'PC_CMD_LOAD', 'PC_CMD_INDEX', 'PC_CMD_CHAT', 'PC_CMD_SUMMARIZE',
     'PC_CMD_SUGGEST', 'PC_CMD_FILL', 'PC_CMD_EMBED_FILTER',
     'PC_CMD_AGENT_STEP', 'PC_CMD_REMAINING_GOAL', 'PC_CMD_INDEX_KNOWLEDGE',
   ]);
@@ -179,22 +182,24 @@ function cdpSend(tabId, method, params = {}, timeoutMs = 15000) {
 }
 
 async function cdpAttach(tabId) {
-  if (_cdpTabId === tabId) return;
-  if (_cdpTabId !== null) {
-    chrome.debugger.detach({ tabId: _cdpTabId }).catch(() => {});
-    _cdpTabId = null;
-    _cdpNodeMap = {};
-  }
-  // Detach any stale session on this tab (e.g. from a previous SW lifetime)
-  await new Promise(r => chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; r(); }));
-  await new Promise((resolve, reject) => {
-    chrome.debugger.attach({ tabId }, '1.3', () => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve();
+  if (_cdpTabId !== tabId) {
+    if (_cdpTabId !== null) {
+      chrome.debugger.detach({ tabId: _cdpTabId }).catch(() => {});
+      _cdpTabId = null;
+    }
+    // Detach any stale session on this tab (e.g. from a previous SW lifetime)
+    await new Promise(r => chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; r(); }));
+    await new Promise((resolve, reject) => {
+      chrome.debugger.attach({ tabId }, '1.3', () => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve();
+      });
     });
-  });
-  _cdpTabId = tabId;
-  // Enable required CDP domains (needed for DOM.resolveNode, Runtime.callFunctionOn, AX tree)
+    _cdpTabId = tabId;
+  }
+  // Always re-enable domains and clear the node map — required after every navigation
+  // even within the same tab session, because DOM/Runtime/Accessibility contexts reset.
+  _cdpNodeMap = {};
   await Promise.all([
     cdpSend(tabId, 'DOM.enable', {}),
     cdpSend(tabId, 'Runtime.enable', {}),
@@ -208,6 +213,16 @@ async function cdpDetach() {
   _cdpTabId  = null;
   _cdpNodeMap = {};
 }
+
+// If Chrome detaches the debugger externally (user dismisses the debugging banner,
+// DevTools attaches, or the target crashes), clear state so cdpAttach can re-attach.
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId === _cdpTabId) {
+    console.log(`[arkhon-bg] debugger detached externally (${reason}) — clearing CDP state`);
+    _cdpTabId   = null;
+    _cdpNodeMap = {};
+  }
+});
 
 const CDP_INTERACTIVE_ROLES = new Set([
   'button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio',

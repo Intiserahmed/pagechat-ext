@@ -65,7 +65,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg.type) {
     case 'PC_CMD_LOAD':
       broadcast(); // announce real state immediately — fixes SW-restart stale-cache stuck-idle
-      pc.loadModels();
+      pc.loadModels().catch(console.error);
       break;
 
     case 'PC_CMD_CLEAR_CACHE':
@@ -137,6 +137,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         })
         .catch(() => {
           _indexingKnowledge = false;
+          _lastKnowledgeText = ''; // reset so a retry with the same text isn't permanently skipped
           chrome.runtime.sendMessage({ type: 'PC_KNOWLEDGE_DONE', tabId: msg.tabId }).catch(() => {});
         });
       break;
